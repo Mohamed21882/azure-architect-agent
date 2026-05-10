@@ -9,13 +9,18 @@ Flow per repo:
 
 Run:
     python -m brain.ingest.pipeline
-    # or with a custom embed model / collection:
+    python -m brain.ingest.pipeline --incremental
     python -m brain.ingest.pipeline --model mistral-small:latest --collection my_wiki
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
+import hashlib
+import json
+import os
+import subprocess
 import sys
 import time
 from collections import defaultdict
@@ -27,11 +32,18 @@ from brain.config import BrainConfig, CONFIG
 from brain.ingest.chunker import chunk_document
 from brain.ingest.embedder import embed_chunks
 from brain.ingest.local_reader import read_all_sources, walk_source
+from brain.models import IngestSource, RawDocument
 from brain.search.bm25_index import BM25Index
-from brain.store.vector_store import ensure_collection, get_client, reset_collection, upsert_chunks
+from brain.store.vector_store import (
+    ensure_collection,
+    get_client,
+    mark_superseded,
+    reset_collection,
+    upsert_chunks,
+)
 
-# Max chunks sent to Qdrant in a single upsert call
 _QDRANT_BATCH = 256
+_MANIFEST_PATH = os.path.join(CONFIG.wiki_root, "data", "ingest_manifest.json")
 
 
 @dataclass
@@ -78,6 +90,26 @@ def _print_stats_table(stats: dict[str, RepoStats]) -> None:
     )
     print("  ".join(f"{str(v):<{w}}" for v, w in zip(total_row, widths)))
     print("=" * len(header) + "\n")
+
+
+def _load_manifest(config: BrainConfig) -> dict:
+    manifest_path = os.path.join(config.wiki_root, "data", "ingest_manifest.json")
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"last_run": "", "files": {}}
+
+
+def _save_manifest(manifest: dict, config: BrainConfig) -> None:
+    manifest_path = os.path.join(config.wiki_root, "data", "ingest_manifest.json")
+    try:
+        os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+        with open(manifest_path, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=2)
+    except PermissionError:
+        print(f"  [WARN] Cannot write manifest (permission denied: {manifest_path})")
+        print("         Run: sudo chown -R $USER data/ to fix.")
 
 
 def run_pipeline(config: BrainConfig = CONFIG, reset: bool = False) -> None:
@@ -127,6 +159,13 @@ def run_pipeline(config: BrainConfig = CONFIG, reset: bool = False) -> None:
         for repo, docs in repo_docs.items()
     }
 
+    # Track file → chunk_ids for manifest
+    manifest_chunks: dict[str, list[str]] = defaultdict(list)
+    doc_content_by_path: dict[str, str] = {}
+    for repo, docs in repo_docs.items():
+        for doc in docs:
+            doc_content_by_path[doc.file_path] = doc.content
+
     # ── Phase 2: Per-repo ingest ───────────────────────────────────────────
     for repo, docs in repo_docs.items():
         s = stats[repo]
@@ -145,6 +184,8 @@ def run_pipeline(config: BrainConfig = CONFIG, reset: bool = False) -> None:
                     )
                     all_chunks.extend(chunks)
                     s.chunks += len(chunks)
+                    for chunk in chunks:
+                        manifest_chunks[chunk.file_path].append(chunk.chunk_id)
                 except Exception as exc:
                     s.skipped_docs += 1
                     tqdm.write(f"    [WARN] chunk {doc.file_path}: {exc}")
@@ -209,12 +250,233 @@ def run_pipeline(config: BrainConfig = CONFIG, reset: bool = False) -> None:
     bm25.save(config.bm25_index_path)
     print(f"  Saved → {config.bm25_index_path}\n")
 
-    # ── Phase 4: Summary ──────────────────────────────────────────────────
+    # ── Phase 4: Write ingest manifest ────────────────────────────────────
+    now_str = datetime.datetime.utcnow().isoformat()
+    manifest_files: dict[str, dict] = {}
+    for file_path, chunk_ids in manifest_chunks.items():
+        rel_path = os.path.relpath(file_path, config.wiki_root)
+        raw_content = doc_content_by_path.get(file_path, "")
+        content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
+        manifest_files[rel_path] = {
+            "hash": content_hash,
+            "chunk_ids": chunk_ids,
+            "ingested_at": now_str,
+        }
+    _save_manifest({"last_run": now_str, "files": manifest_files}, config)
+    print(f"  Manifest saved: {len(manifest_files)} files → data/ingest_manifest.json\n")
+
+    # ── Phase 5: Summary ──────────────────────────────────────────────────
     _print_stats_table(stats)
     print("Pipeline complete.\n")
 
 
-def _parse_args() -> tuple[BrainConfig, bool]:
+def run_incremental(config: BrainConfig = CONFIG) -> None:
+    """Incremental ingest: git pull each source repo, re-index only changed .md files,
+    then run a confidence decay pass over all Qdrant chunks."""
+    print("\n╔══════════════════════════════════════╗")
+    print("║   TE-1 Brain Incremental Ingest      ║")
+    print("╚══════════════════════════════════════╝\n")
+
+    # ── Phase 0: Load manifest ────────────────────────────────────────────
+    manifest = _load_manifest(config)
+    files_manifest: dict[str, dict] = manifest.get("files", {})
+    print(f"Manifest loaded: {len(files_manifest)} tracked files "
+          f"(last run: {manifest.get('last_run', 'never')})\n")
+
+    # ── Phase 1: Connect to Qdrant + load BM25 ───────────────────────────
+    print("Connecting to Qdrant...")
+    try:
+        qdrant = get_client(config)
+        ensure_collection(qdrant, config)
+        print(f"  Collection '{config.qdrant_collection}' ready.\n")
+    except Exception as exc:
+        print(f"\n[ERROR] Cannot reach Qdrant: {exc}")
+        sys.exit(1)
+
+    bm25 = BM25Index.empty()
+    if os.path.exists(config.bm25_index_path):
+        try:
+            bm25 = BM25Index.load(config.bm25_index_path)
+            print(f"  BM25 index loaded ({len(bm25)} chunks).\n")
+        except Exception:
+            print("  BM25 index not found or corrupt — starting fresh.\n")
+
+    # ── Phase 2: git pull + diff each source repo ─────────────────────────
+    changed_files: list[str] = []
+    for repo_name, root_dir in config.source_dirs.items():
+        if not os.path.isdir(root_dir):
+            continue
+
+        try:
+            result = subprocess.run(
+                ["git", "pull"],
+                cwd=root_dir,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            summary = result.stdout.strip().splitlines()[0] if result.stdout.strip() else "ok"
+            print(f"  [{repo_name}] git pull: {summary}")
+        except Exception as exc:
+            print(f"  [{repo_name}] git pull skipped: {exc}")
+
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "HEAD@{1}", "HEAD"],
+                cwd=root_dir,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line.endswith(".md"):
+                    abs_path = os.path.join(root_dir, line)
+                    if os.path.isfile(abs_path):
+                        changed_files.append(abs_path)
+        except Exception as exc:
+            print(f"  [{repo_name}] git diff skipped: {exc}")
+
+    print(f"\nChanged .md files detected: {len(changed_files)}")
+
+    # ── Phase 3: Re-index changed files ───────────────────────────────────
+    updated_count = 0
+    for file_path in changed_files:
+        rel_path = os.path.relpath(file_path, config.wiki_root)
+
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
+                raw_content = fh.read()
+        except OSError:
+            continue
+
+        new_hash = hashlib.sha256(raw_content.encode()).hexdigest()
+        stored = files_manifest.get(rel_path, {})
+
+        if stored.get("hash") == new_hash:
+            continue  # content identical — skip
+
+        print(f"  Re-indexing: {rel_path}")
+
+        # Delete old chunks from Qdrant
+        old_chunk_ids = stored.get("chunk_ids", [])
+        if old_chunk_ids:
+            mark_superseded(qdrant, old_chunk_ids, config)
+
+        # Determine source repo from path
+        source_repo = "unknown"
+        for rn, rd in config.source_dirs.items():
+            if file_path.startswith(rd):
+                source_repo = rn
+                break
+
+        # Build RawDocument — strip YAML frontmatter inline
+        import re as _re
+        clean = _re.sub(r"^---\s*\n.*?\n---\s*\n", "", raw_content, count=1, flags=_re.DOTALL).lstrip()
+        title_match = _re.search(r"^#\s+(.+)", clean, _re.MULTILINE)
+        title = (title_match.group(1).strip() if title_match
+                 else os.path.basename(file_path)[:-3].replace("-", " ").title())
+
+        doc = RawDocument(
+            doc_id=hashlib.sha1(file_path.encode()).hexdigest(),
+            content=clean,
+            source=IngestSource.MICROSOFT_LEARN,
+            source_repo=source_repo,
+            file_path=file_path,
+            title=title,
+        )
+
+        chunks = chunk_document(
+            doc,
+            chunk_size=config.chunk_size_words,
+            overlap=config.chunk_overlap_words,
+            min_words=config.min_chunk_words,
+        )
+        if not chunks:
+            continue
+
+        try:
+            embed_chunks(chunks, config)
+        except Exception as exc:
+            print(f"    [WARN] Embed failed for {rel_path}: {exc}")
+            continue
+
+        embedded = [c for c in chunks if c.embedding is not None]
+        if embedded:
+            upsert_chunks(qdrant, embedded, config)
+
+        bm25.add(chunks)
+
+        files_manifest[rel_path] = {
+            "hash": new_hash,
+            "chunk_ids": [c.chunk_id for c in chunks],
+            "ingested_at": datetime.datetime.utcnow().isoformat(),
+        }
+        updated_count += 1
+
+    print(f"  Re-indexed {updated_count} file(s).\n")
+
+    # ── Phase 4: Confidence decay pass ────────────────────────────────────
+    print("Running confidence decay pass (batch size 500)...")
+    decay_updates = 0
+    try:
+        offset = None
+        while True:
+            records, offset = qdrant.scroll(
+                collection_name=config.qdrant_collection,
+                limit=500,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+
+            for point in records:
+                payload = point.payload or {}
+                stored_confidence = payload.get("confidence")
+                last_confirmed = payload.get("last_confirmed_at", "")
+                if stored_confidence is None or not last_confirmed:
+                    continue
+
+                try:
+                    confirmed = datetime.datetime.fromisoformat(last_confirmed)
+                    days_since = max(0, (datetime.datetime.utcnow() - confirmed).days)
+                    decayed = max(0.1, stored_confidence * (0.95 ** (days_since / 30)))
+                except (ValueError, TypeError):
+                    continue
+
+                if abs(decayed - stored_confidence) > 0.01:
+                    qdrant.set_payload(
+                        collection_name=config.qdrant_collection,
+                        payload={"confidence": round(decayed, 4)},
+                        points=[point.id],
+                        wait=False,
+                    )
+                    decay_updates += 1
+
+            if offset is None:
+                break
+
+    except Exception as exc:
+        print(f"  [WARN] Decay pass error: {exc}")
+
+    print(f"  Confidence decay updates applied: {decay_updates}\n")
+
+    # ── Phase 5: Persist BM25 + manifest ──────────────────────────────────
+    if updated_count > 0:
+        print(f"Rebuilding BM25 index ({len(bm25)} chunks)...")
+        bm25.build()
+        bm25.save(config.bm25_index_path)
+        print(f"  Saved → {config.bm25_index_path}\n")
+
+    now_str = datetime.datetime.utcnow().isoformat()
+    manifest["last_run"] = now_str
+    manifest["files"] = files_manifest
+    _save_manifest(manifest, config)
+    print(f"  Manifest updated → data/ingest_manifest.json\n")
+    print("Incremental ingest complete.\n")
+
+
+def _parse_args() -> tuple[BrainConfig, bool, bool]:
     parser = argparse.ArgumentParser(description="TE-1 Brain Ingest Pipeline")
     parser.add_argument("--collection", default=CONFIG.qdrant_collection,
                         help="Qdrant collection name")
@@ -228,6 +490,8 @@ def _parse_args() -> tuple[BrainConfig, bool]:
                         help="Qdrant base URL")
     parser.add_argument("--reset", action="store_true",
                         help="Delete and recreate the Qdrant collection before ingesting")
+    parser.add_argument("--incremental", action="store_true",
+                        help="Only re-index files changed since last run (git diff)")
     args = parser.parse_args()
 
     cfg = BrainConfig(
@@ -237,8 +501,12 @@ def _parse_args() -> tuple[BrainConfig, bool]:
         embed_batch_size=args.batch_size,
         chunk_size_words=args.chunk_size,
     )
-    return cfg, args.reset
+    return cfg, args.reset, args.incremental
 
 
 if __name__ == "__main__":
-    run_pipeline(*_parse_args())
+    cfg, reset, incremental = _parse_args()
+    if incremental:
+        run_incremental(cfg)
+    else:
+        run_pipeline(cfg, reset)

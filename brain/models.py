@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -34,3 +35,24 @@ class Chunk:
     token_count: int = 0  # approximate word count
     metadata: dict = field(default_factory=dict)
     embedding: Optional[list[float]] = None
+    confidence: float = 0.5
+    source_count: int = 1
+    reinforcement_count: int = 0
+    last_confirmed_at: str = ""
+
+    def reinforce(self) -> None:
+        """Increment reinforcement count and boost confidence. Called on human approval."""
+        self.reinforcement_count += 1
+        self.last_confirmed_at = datetime.datetime.utcnow().isoformat()
+        self.confidence = min(1.0, 0.5 + 0.1 * self.reinforcement_count)
+
+    def decayed_confidence(self) -> float:
+        """Return confidence after time-based exponential decay since last confirmation."""
+        if not self.last_confirmed_at:
+            return self.confidence
+        try:
+            confirmed = datetime.datetime.fromisoformat(self.last_confirmed_at)
+            days_since = max(0, (datetime.datetime.utcnow() - confirmed).days)
+            return max(0.1, self.confidence * (0.95 ** (days_since / 30)))
+        except ValueError:
+            return self.confidence
