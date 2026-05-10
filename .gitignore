@@ -1,0 +1,31 @@
+# Raw documentation corpus
+raw/
+
+# Local data directories
+data/
+
+# Brain index and database
+brain/store/bm25.pkl
+brain/store/te1.db
+*.db
+
+# Environment
+.env
+.smart-env/
+
+# Claude Code session data (private conversation history)
+.claude/
+
+# Obsidian trash
+.trash/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
