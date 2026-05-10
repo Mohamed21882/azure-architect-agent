@@ -88,8 +88,8 @@ The target user is an **Azure admin who lacks architectural expertise** — not 
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/te-1.git
-cd te-1
+git clone https://github.com/Mohamed21882/azure-architect-agent.git
+cd azure-architect-agent
 ```
 
 ### 2. Set up the Python environment
