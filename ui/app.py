@@ -674,6 +674,11 @@ with st.sidebar:
         else:
             st.warning("Brain index not loaded.")
 
+    # ── Brain Context placeholder — populated by update_brain_context() ────
+    st.divider()
+    st.subheader("🧠 Brain Context")
+    brain_ctx_container = st.sidebar.container()
+
     # ── My Architectures / Guest prompt ───────────────────────────────────
     st.divider()
 
@@ -715,11 +720,6 @@ with st.sidebar:
                 for k in list(st.session_state.keys()):
                     del st.session_state[k]
                 st.rerun()
-
-    # ── Brain Context placeholder — populated by update_brain_context() ────
-    st.divider()
-    st.subheader("🧠 Brain Context")
-    brain_ctx_container = st.sidebar.container()
 
 
 # ── LLM kwargs helper ──────────────────────────────────────────────────────
