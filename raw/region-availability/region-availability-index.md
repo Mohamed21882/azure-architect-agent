@@ -27,7 +27,7 @@ When designing for Qatar Central or UAE North, apply these rules:
 
 4. **AI Search is GA in Qatar Central.** Azure AI Search (formerly Cognitive Search) is generally available in Qatar Central and is a valid component for RAG pipelines and enterprise search workloads.
 
-5. **Azure OpenAI is NOT available in Qatar Central.** If the architecture requires Azure OpenAI, it must be deployed in UAE North or a supported region (e.g., Sweden Central, East US). Access via Private Endpoint with UAE North or a PAYG hub pattern.
+5. **Azure OpenAI and Microsoft Foundry: Qatar Central is a supported Foundry project region.** Azure OpenAI is available — verify specific model quota availability per subscription at the Azure OpenAI quotas page before deployment, as quota is allocated per region per subscription.
 
 6. **Storage, Key Vault, and SQL are fully GA in both regions.** No availability concerns for these foundational services.
 

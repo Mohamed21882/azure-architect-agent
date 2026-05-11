@@ -147,18 +147,11 @@ UAE North is a Generally Available Azure region located in Dubai, United Arab Em
 
 ## Architecture Recommendations for UAE North
 
-### Primary advantage over Qatar Central
-UAE North is the only GCC region with **Azure OpenAI GA**. If the architecture requires LLM inference via Azure OpenAI, UAE North is the mandatory deployment region. Access from Qatar Central workloads is possible via VNet peering and Private Endpoint.
+### Azure OpenAI in the Gulf
+Both UAE North and Qatar Central are supported Foundry project regions with Azure OpenAI GA. UAE North has a more mature deployment with broader model availability. When designing for Qatar Central, Azure OpenAI can be deployed locally — verify model quota availability per subscription before committing to the region.
 
-### For cross-region RAG architectures (Qatar data residency + Azure OpenAI)
-```
-Qatar Central VNet
-  └── AKS cluster (orchestration)
-  └── AI Search (Qatar Central — data stays in Qatar)
-  └── Private Endpoint → UAE North VNet (peering)
-       └── Azure OpenAI endpoint (UAE North)
-```
-All inference traffic stays on the Azure backbone. Data used for indexing remains in Qatar Central.
+### For RAG architectures with Gulf data residency
+Deploy all components — AI Search, Azure OpenAI, and orchestration — within the same region (Qatar Central or UAE North) to satisfy data residency requirements. Cross-region patterns are only required if a specific model or quota is unavailable in the target region.
 
 ### Hub-and-spoke in UAE North
 - Mature region with full hub networking support

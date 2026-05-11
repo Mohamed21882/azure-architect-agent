@@ -112,13 +112,13 @@ Qatar Central is a Generally Available Azure region located in Doha, Qatar. It i
 
 ---
 
-## AI and Search — Partial
+## AI and Search
 
 | Service | Status | Notes |
 |---|---|---|
 | Azure AI Search | **GA** | Formerly Cognitive Search. All tiers including S3 HD. Valid for RAG pipelines. |
 | Azure AI Services (multi-service) | **GA** | Includes Vision, Language, Speech APIs |
-| Azure OpenAI Service | **NOT AVAILABLE** | Not deployed in Qatar Central. Use UAE North or Sweden Central. Architect via Private Endpoint hub pattern. |
+| Azure OpenAI Service | **GA** | Foundry project region supported. Verify model quota per subscription. |
 | Azure Machine Learning | **GA** | |
 | Azure AI Studio | Preview | Limited feature set |
 
@@ -150,7 +150,7 @@ Qatar Central is a Generally Available Azure region located in Doha, Qatar. It i
 
 ### For RAG / AI Search workloads
 - Deploy Azure AI Search in Qatar Central — it is GA and fully supported
-- For LLM inference requiring Azure OpenAI: deploy the OpenAI endpoint in UAE North with Private Endpoint access from Qatar Central VNet via VNet peering and Private DNS Zone override
+- Azure OpenAI is available in Qatar Central (Foundry project region). Verify model quota availability per subscription before deployment.
 - Use AKS in Qatar Central for orchestration agents (GA)
 
 ### For enterprise workloads (PCI-DSS, ISO 27001)
