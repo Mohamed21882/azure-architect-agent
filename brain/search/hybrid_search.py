@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid as _uuid
+
 from brain.config import BrainConfig
 from brain.ingest.embedder import embed_texts
 from brain.search.bm25_index import BM25Index
@@ -124,5 +126,87 @@ def _reinforce_results(
     if chunks_to_update:
         try:
             upsert_chunks(client, chunks_to_update, config)
+        except Exception:
+            pass
+
+
+_TECHNICAL_CATEGORIES = {"wrong_service_behaviour", "wrong_region_availability"}
+
+
+def apply_feedback_to_chunks(
+    chunk_ids: list,
+    rating: str,
+    category: str = None,
+) -> None:
+    """Update chunk confidence in Qdrant based on human feedback.
+
+    Positive: reinforce() each chunk (confidence boost + increment count).
+    Negative with technical category: apply -0.05 decay (floor 0.1).
+    Other negative categories: no confidence change.
+    """
+    from brain.config import CONFIG
+    from brain.models import Chunk, IngestSource
+
+    if not chunk_ids:
+        return
+    if rating not in ("positive", "negative"):
+        return
+    if rating == "negative" and category not in _TECHNICAL_CATEGORIES:
+        return
+
+    try:
+        client = get_client(CONFIG)
+    except Exception:
+        return
+
+    chunks_to_update: list[Chunk] = []
+    for cid in chunk_ids:
+        try:
+            point_id = str(_uuid.UUID(cid))
+        except (ValueError, AttributeError):
+            continue
+        try:
+            records = client.retrieve(
+                collection_name=CONFIG.qdrant_collection,
+                ids=[point_id],
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception:
+            continue
+        if not records:
+            continue
+
+        payload = records[0].payload or {}
+        try:
+            chunk = Chunk(
+                chunk_id=cid,
+                doc_id=payload.get("doc_id", ""),
+                content=payload.get("content", ""),
+                source=IngestSource(payload.get("source", "microsoft_learn")),
+                source_repo=payload.get("source_repo", ""),
+                file_path=payload.get("file_path", ""),
+                title=payload.get("title", ""),
+                chunk_index=payload.get("chunk_index", 0),
+                token_count=payload.get("token_count", 0),
+                confidence=float(payload.get("confidence", 0.5)),
+                source_count=payload.get("source_count", 1),
+                reinforcement_count=payload.get("reinforcement_count", 0),
+                last_confirmed_at=payload.get("last_confirmed_at", ""),
+                embedding=None,
+            )
+        except Exception:
+            continue
+
+        if rating == "positive":
+            chunk.reinforce()
+        else:
+            chunk.confidence = max(0.1, chunk.confidence - 0.05)
+
+        chunks_to_update.append(chunk)
+
+    if chunks_to_update:
+        try:
+            upsert_chunks(client, chunks_to_update, CONFIG)
         except Exception:
             pass

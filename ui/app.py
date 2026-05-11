@@ -3,6 +3,7 @@ import os
 import re
 import time
 import json
+import uuid
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -24,6 +25,8 @@ from brain.db.database import (
     get_user_architectures,
     load_architecture,
     delete_architecture,
+    save_evaluation,
+    update_chunk_feedback_log,
 )
 
 st.set_page_config(page_title="TE-1: Azure Architect Portal", layout="wide")
@@ -492,6 +495,10 @@ def _reset_arch_state() -> None:
     st.session_state.show_deploy_msg        = False
     st.session_state.show_save_input        = False
     st.session_state.arch_saved             = False
+    st.session_state.eval_rating            = None
+    st.session_state.eval_submitted         = False
+    st.session_state.eval_session_id        = str(uuid.uuid4())
+    st.session_state.auto_scores            = None
 
 
 def _load_arch_into_session(arch_id: int) -> None:
@@ -526,6 +533,10 @@ def _load_arch_into_session(arch_id: int) -> None:
     st.session_state.last_hits              = []
     st.session_state.show_save_input        = False
     st.session_state.arch_saved             = True  # already persisted
+    st.session_state.eval_rating            = None
+    st.session_state.eval_submitted         = False
+    st.session_state.eval_session_id        = str(uuid.uuid4())
+    st.session_state.auto_scores            = None
 
 
 # ── Landing screen ─────────────────────────────────────────────────────────
@@ -632,6 +643,10 @@ _defaults: dict = {
     "show_save_input":          False,
     "arch_saved":               False,
     "crystallised_path":        "",
+    "eval_rating":              None,
+    "eval_submitted":           False,
+    "eval_session_id":          "",
+    "auto_scores":              None,
 }
 for _k, _v in _defaults.items():
     if _k not in st.session_state:
@@ -678,6 +693,10 @@ with st.sidebar:
     st.divider()
     st.subheader("🧠 Brain Context")
     brain_ctx_container = st.sidebar.container()
+
+    # ── Evals Dashboard link ──────────────────────────────────────────────
+    st.divider()
+    st.page_link("pages/evals_dashboard.py", label="📊 Evals Dashboard")
 
     # ── My Architectures / Guest prompt ───────────────────────────────────
     st.divider()
@@ -758,6 +777,102 @@ def update_brain_context() -> None:
 
 
 update_brain_context()  # populate from session state on every rerun
+
+
+# ── Approve / eval helpers ─────────────────────────────────────────────────
+
+def _do_approve() -> None:
+    """Reinforce Brain, generate Bicep, and crystallise the session."""
+    fv_approve    = st.session_state.form_values
+    approve_query = (
+        f"{fv_approve.get('description', '')} "
+        f"{fv_approve.get('compliance', '')} Azure "
+        f"{fv_approve.get('region', '')} architecture"
+    )
+    with st.spinner("🔍 Reinforcing Brain…"):
+        _, reinforce_hits = get_brain_context(approve_query, bm25, reinforce=True)
+        if reinforce_hits:
+            st.session_state.last_hits = reinforce_hits
+            update_brain_context()
+
+    bicep_msgs = build_bicep_messages(
+        st.session_state.form_values,
+        st.session_state.llm_history,
+    )
+    with st.spinner("⚙️ Generating complete Bicep template…"):
+        bicep_response = call_llm(bicep_msgs, SYSTEM_BICEP, **_llm(max_tokens=-1))
+
+    bicep_match = re.search(
+        r"```bicep\s*(.*?)(?:```|$)", bicep_response, re.DOTALL | re.IGNORECASE
+    )
+    st.session_state.approved_bicep = (
+        bicep_match.group(1).strip() if bicep_match else bicep_response.strip()
+    )
+    st.session_state.bicep_filename = (
+        f"te1-architecture-{time.strftime('%Y%m%d-%H%M%S')}.bicep"
+    )
+    st.session_state.arch_saved = False
+
+    try:
+        from brain.wiki.crystalliser import crystallise_session
+        last_assist = next(
+            (msg["content"] for msg in reversed(st.session_state.llm_history)
+             if msg["role"] == "assistant"),
+            "",
+        )
+        wiki_path = crystallise_session({
+            "description":          fv_approve.get("description", ""),
+            "form_values":          fv_approve,
+            "messages":             strip_bicep_from_history(st.session_state.llm_history),
+            "retrieved_chunks":     st.session_state.last_hits,
+            "architecture_summary": strip_bicep(last_assist),
+        })
+        st.session_state.crystallised_path = wiki_path
+    except Exception:
+        pass
+
+    st.rerun()
+
+
+def _save_eval_and_update_chunks(
+    rating: str,
+    category: str,
+    feedback_text: str,
+) -> None:
+    """Persist evaluation and propagate feedback to chunk confidence scores."""
+    chunk_ids = [
+        h.get("chunk_id", "")
+        for h in st.session_state.get("last_hits", [])
+        if h.get("chunk_id")
+    ]
+    last_assist = next(
+        (msg["content"] for msg in reversed(st.session_state.get("llm_history", []))
+         if msg["role"] == "assistant"),
+        "",
+    )
+    try:
+        save_evaluation(
+            user_id=st.session_state.get("user_id"),
+            session_id=st.session_state.get("eval_session_id", ""),
+            rating=rating,
+            category=category,
+            feedback_text=feedback_text,
+            retrieved_chunk_ids=chunk_ids,
+            auto_scores=st.session_state.get("auto_scores") or {},
+            architecture_summary=last_assist[:2000],
+            form_values=st.session_state.get("form_values", {}),
+        )
+    except Exception:
+        pass
+    try:
+        update_chunk_feedback_log(chunk_ids, rating, category)
+    except Exception:
+        pass
+    try:
+        from brain.search.hybrid_search import apply_feedback_to_chunks
+        apply_feedback_to_chunks(chunk_ids, rating, category)
+    except Exception:
+        pass
 
 
 # ── Main UI ────────────────────────────────────────────────────────────────
@@ -866,6 +981,22 @@ if submit:
     st.session_state.llm_history.append({"role": "assistant", "content": response})
     st.session_state.chat_display           = [{"role": "assistant", "content": response}]
     st.session_state.architecture_generated = True
+
+    try:
+        from brain.eval.auto_scorer import score_architecture
+        with st.spinner("📊 Scoring architecture…"):
+            st.session_state.auto_scores = score_architecture(
+                architecture_summary=response,
+                form_values=fv,
+                retrieved_chunks=hits,
+                engine_mode=engine_mode,
+                model=selected_model,
+                provider=provider,
+                api_key=api_key,
+            )
+    except Exception:
+        st.session_state.auto_scores = None
+
     st.rerun()
 
 # ── Architecture output & conversation ────────────────────────────────────
@@ -915,61 +1046,123 @@ if st.session_state.architecture_generated:
 
     st.markdown("---")
 
+    # ── Architecture Quality ──────────────────────────────────────────────
+
+    st.subheader("📊 Architecture Quality")
+    _scores = st.session_state.get("auto_scores") or {}
+    _flags  = [f for f in _scores.get("flags", []) if f and f != "auto-score unavailable"]
+
+    if _scores and _scores.get("overall") is not None:
+        _overall = _scores.get("overall", 0.5)
+        _ca      = _scores.get("constraint_adherence", 0.5)
+        _sp      = _scores.get("security_posture", 0.5)
+        _co      = _scores.get("completeness", 0.5)
+
+        def _dim_icon(s: float) -> str:
+            return "✓" if s > 0.7 else "△" if s >= 0.5 else "✗"
+
+        st.progress(_overall, text=f"Architecture Quality: {_overall:.2f}")
+        _dc1, _dc2, _dc3 = st.columns(3)
+        _dc1.caption(f"Constraints {_dim_icon(_ca)}")
+        _dc2.caption(f"Security {_dim_icon(_sp)}")
+        _dc3.caption(f"Completeness {_dim_icon(_co)}")
+        if _flags:
+            with st.expander("⚠️ Issues found"):
+                for _fl in _flags:
+                    st.markdown(f"- {_fl}")
+    else:
+        st.caption("Auto-score unavailable — scorer requires a running LLM.")
+
+    st.markdown("─────────────────────────────────────────")
+    st.markdown("**Rate this architecture before approving**")
+
+    _eval_rating    = st.session_state.eval_rating
+    _eval_submitted = st.session_state.eval_submitted
+
+    if _eval_submitted:
+        st.success("✓ Feedback recorded — thank you for improving TE-1")
+
+    elif _eval_rating is None:
+        _cg, _cb = st.columns(2)
+        with _cg:
+            if st.button("👍 Good architecture", use_container_width=True, key="eval_good"):
+                st.session_state.eval_rating = "positive"
+                st.rerun()
+        with _cb:
+            if st.button("👎 Needs work", use_container_width=True, key="eval_bad"):
+                st.session_state.eval_rating = "negative"
+                st.rerun()
+
+    elif _eval_rating == "positive":
+        _pos_text = st.text_area(
+            "What makes this well-suited for your needs?",
+            placeholder="(optional)",
+            key="eval_pos_text",
+        )
+        _cs, _csk = st.columns(2)
+        with _cs:
+            if st.button("Submit Feedback", use_container_width=True, key="eval_pos_submit"):
+                _save_eval_and_update_chunks("positive", "", _pos_text)
+                st.session_state.eval_submitted = True
+                st.rerun()
+        with _csk:
+            if st.button("Skip and Approve →", use_container_width=True,
+                         type="secondary", key="eval_skip"):
+                _save_eval_and_update_chunks("skipped", "", "")
+                st.session_state.eval_submitted = True
+                _do_approve()
+
+    elif _eval_rating == "negative":
+        _NEG_OPTS = [
+            "Wrong Azure service behaviour",
+            "Wrong region/service availability",
+            "Over-engineered for budget",
+            "Doesn't match our existing infrastructure",
+            "Missing required components",
+            "Other",
+        ]
+        _NEG_CODES = {
+            "Wrong Azure service behaviour":             "wrong_service_behaviour",
+            "Wrong region/service availability":         "wrong_region_availability",
+            "Over-engineered for budget":                "over_engineered",
+            "Doesn't match our existing infrastructure": "infrastructure_mismatch",
+            "Missing required components":               "missing_components",
+            "Other":                                     "other",
+        }
+        st.markdown("**What's the issue? (required)**")
+        _neg_label = st.radio(
+            "What's the issue?",
+            _NEG_OPTS,
+            key="eval_neg_category",
+            label_visibility="collapsed",
+        )
+        _neg_text = st.text_area(
+            "Describe the issue — TE-1 will learn from this.",
+            key="eval_neg_text",
+        )
+        if st.button("Submit Feedback", use_container_width=True, key="eval_neg_submit"):
+            if not _neg_text.strip():
+                st.error("Please describe the issue before submitting.")
+            else:
+                _neg_code = _NEG_CODES.get(_neg_label, "other")
+                _save_eval_and_update_chunks("negative", _neg_code, _neg_text)
+                st.session_state.eval_submitted = True
+                st.rerun()
+
+    st.markdown("---")
+
     # ── Approve + Deploy buttons ──────────────────────────────────────────
 
+    _approve_locked = (_eval_rating == "negative" and not _eval_submitted)
     col_approve, col_deploy = st.columns(2)
 
     with col_approve:
-        if st.button("✅ Approve Architecture & Generate Bicep",
-                     use_container_width=True, key="approve_btn"):
-            # Reinforce Brain knowledge base — human approval signal
-            fv_approve = st.session_state.form_values
-            approve_query = (
-                f"{fv_approve.get('description', '')} "
-                f"{fv_approve.get('compliance', '')} Azure "
-                f"{fv_approve.get('region', '')} architecture"
-            )
-            with st.spinner("🔍 Reinforcing Brain…"):
-                _, reinforce_hits = get_brain_context(approve_query, bm25, reinforce=True)
-                if reinforce_hits:
-                    st.session_state.last_hits = reinforce_hits
-                    update_brain_context()
-
-            bicep_msgs = build_bicep_messages(
-                st.session_state.form_values,
-                st.session_state.llm_history,
-            )
-            with st.spinner("⚙️ Generating complete Bicep template…"):
-                bicep_response = call_llm(bicep_msgs, SYSTEM_BICEP, **_llm(max_tokens=-1))
-
-            m = re.search(r"```bicep\s*(.*?)(?:```|$)", bicep_response,
-                          re.DOTALL | re.IGNORECASE)
-            st.session_state.approved_bicep = m.group(1).strip() if m else bicep_response.strip()
-            st.session_state.bicep_filename = (
-                f"te1-architecture-{time.strftime('%Y%m%d-%H%M%S')}.bicep"
-            )
-            st.session_state.arch_saved = False  # new Bicep resets saved state
-
-            # Crystallise session into wiki/semantic/
-            try:
-                from brain.wiki.crystalliser import crystallise_session
-                last_assistant = next(
-                    (m["content"] for m in reversed(st.session_state.llm_history)
-                     if m["role"] == "assistant"),
-                    "",
-                )
-                wiki_path = crystallise_session({
-                    "description":         fv_approve.get("description", ""),
-                    "form_values":         fv_approve,
-                    "messages":            strip_bicep_from_history(st.session_state.llm_history),
-                    "retrieved_chunks":    st.session_state.last_hits,
-                    "architecture_summary": strip_bicep(last_assistant),
-                })
-                st.session_state.crystallised_path = wiki_path
-            except Exception:
-                pass
-
-            st.rerun()
+        if _approve_locked:
+            st.info("Submit feedback above to unlock the Approve button.")
+        else:
+            if st.button("✅ Approve Architecture & Generate Bicep",
+                         use_container_width=True, key="approve_btn"):
+                _do_approve()
 
     with col_deploy:
         if st.button("🌐 Deploy to Azure Tenant",

@@ -67,6 +67,34 @@ def init_db() -> None:
             token      TEXT    NOT NULL UNIQUE,
             expires_at TEXT    NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS evaluations (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id               INTEGER,
+            session_id            TEXT,
+            rating                TEXT CHECK(rating IN ('positive','negative','skipped')),
+            category              TEXT,
+            feedback_text         TEXT,
+            retrieved_chunk_ids   TEXT,
+            auto_score_overall    REAL,
+            auto_score_constraints REAL,
+            auto_score_security   REAL,
+            auto_score_completeness REAL,
+            architecture_summary  TEXT,
+            form_values_json      TEXT,
+            created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS chunk_feedback_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            chunk_id        TEXT NOT NULL UNIQUE,
+            flag_count      INTEGER DEFAULT 0,
+            positive_count  INTEGER DEFAULT 0,
+            last_flagged_at TIMESTAMP,
+            last_positive_at TIMESTAMP,
+            quarantined     INTEGER DEFAULT 0
+        );
         """)
 
 
@@ -228,3 +256,139 @@ def delete_architecture(arch_id: int, user_id: int) -> bool:
             (arch_id, user_id),
         )
     return cur.rowcount > 0
+
+
+# ── Evaluations ────────────────────────────────────────────────────────────
+
+def save_evaluation(
+    user_id: int | None,
+    session_id: str,
+    rating: str,
+    category: str,
+    feedback_text: str,
+    retrieved_chunk_ids: list,
+    auto_scores: dict,
+    architecture_summary: str,
+    form_values: dict,
+) -> int:
+    """Persist a human evaluation. Returns the new row id."""
+    with _conn() as con:
+        cur = con.execute(
+            """INSERT INTO evaluations
+               (user_id, session_id, rating, category, feedback_text,
+                retrieved_chunk_ids, auto_score_overall, auto_score_constraints,
+                auto_score_security, auto_score_completeness,
+                architecture_summary, form_values_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                user_id,
+                session_id,
+                rating,
+                category,
+                feedback_text,
+                json.dumps(retrieved_chunk_ids),
+                auto_scores.get("overall", 0.5),
+                auto_scores.get("constraint_adherence", 0.5),
+                auto_scores.get("security_posture", 0.5),
+                auto_scores.get("completeness", 0.5),
+                architecture_summary,
+                json.dumps(form_values),
+            ),
+        )
+    return cur.lastrowid
+
+
+def update_chunk_feedback_log(
+    chunk_ids: list,
+    rating: str,
+    category: str = "",
+) -> None:
+    """Update per-chunk feedback counters. Quarantines a chunk after 3 negative flags."""
+    now = datetime.now(timezone.utc).isoformat()
+    technical = {"wrong_service_behaviour", "wrong_region_availability"}
+
+    with _conn() as con:
+        for chunk_id in chunk_ids:
+            con.execute(
+                "INSERT OR IGNORE INTO chunk_feedback_log (chunk_id) VALUES (?)",
+                (chunk_id,),
+            )
+            if rating == "positive":
+                con.execute(
+                    "UPDATE chunk_feedback_log "
+                    "SET positive_count = positive_count + 1, last_positive_at = ? "
+                    "WHERE chunk_id = ?",
+                    (now, chunk_id),
+                )
+            elif rating == "negative" and category in technical:
+                con.execute(
+                    "UPDATE chunk_feedback_log "
+                    "SET flag_count = flag_count + 1, last_flagged_at = ? "
+                    "WHERE chunk_id = ?",
+                    (now, chunk_id),
+                )
+                row = con.execute(
+                    "SELECT flag_count FROM chunk_feedback_log WHERE chunk_id = ?",
+                    (chunk_id,),
+                ).fetchone()
+                if row and row["flag_count"] >= 3:
+                    con.execute(
+                        "UPDATE chunk_feedback_log SET quarantined = 1 WHERE chunk_id = ?",
+                        (chunk_id,),
+                    )
+
+
+def get_eval_dashboard_stats(user_id: int | None = None) -> dict:
+    """Return aggregate evaluation statistics and top flagged chunks."""
+    where  = "WHERE user_id = ?" if user_id is not None else ""
+    params = (user_id,) if user_id is not None else ()
+
+    with _conn() as con:
+        row = con.execute(
+            f"""SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN rating = 'positive' THEN 1 ELSE 0 END) AS positive_count,
+                    SUM(CASE WHEN rating = 'negative' THEN 1 ELSE 0 END) AS negative_count,
+                    SUM(CASE WHEN rating = 'skipped'  THEN 1 ELSE 0 END) AS skip_count,
+                    AVG(auto_score_overall) AS avg_auto_score
+                FROM evaluations {where}""",
+            params,
+        ).fetchone()
+
+        total          = row["total"]         or 0
+        positive_count = row["positive_count"] or 0
+        negative_count = row["negative_count"] or 0
+        skip_count     = row["skip_count"]     or 0
+        avg_auto_score = row["avg_auto_score"] or 0.0
+        skip_rate      = skip_count / total if total > 0 else 0.0
+
+        top_flagged = con.execute(
+            "SELECT chunk_id, flag_count, quarantined "
+            "FROM chunk_feedback_log "
+            "ORDER BY flag_count DESC LIMIT 10"
+        ).fetchall()
+
+    return {
+        "total_evals":       total,
+        "positive_count":    positive_count,
+        "negative_count":    negative_count,
+        "skip_count":        skip_count,
+        "avg_auto_score":    avg_auto_score,
+        "skip_rate":         skip_rate,
+        "top_flagged_chunks": [dict(r) for r in top_flagged],
+    }
+
+
+def get_recent_evaluations(limit: int = 20) -> list[dict]:
+    """Return the most recent evaluations with user info."""
+    with _conn() as con:
+        rows = con.execute(
+            """SELECT e.id, e.session_id, e.rating, e.category, e.feedback_text,
+                      e.auto_score_overall, e.created_at, u.username
+               FROM evaluations e
+               LEFT JOIN users u ON u.id = e.user_id
+               ORDER BY e.created_at DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
