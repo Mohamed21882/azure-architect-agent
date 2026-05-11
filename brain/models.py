@@ -3,12 +3,26 @@ from __future__ import annotations
 import datetime
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Optional, Union
 
 
 class IngestSource(str, Enum):
     MICROSOFT_LEARN = "microsoft_learn"
     LOCAL = "local"
+
+
+class EntityType(str, Enum):
+    API_OPERATION         = "api_operation"
+    ARCHITECTURE_PATTERN  = "architecture_pattern"
+    REFERENCE_ARCH        = "reference_arch"
+    REGION_AVAILABILITY   = "region_availability"
+    GENERAL               = "general"
+
+
+class MemoryTier(str, Enum):
+    SEMANTIC   = "semantic"
+    PROCEDURAL = "procedural"
+    ENTITY     = "entity"
 
 
 @dataclass
@@ -39,6 +53,8 @@ class Chunk:
     source_count: int = 1
     reinforcement_count: int = 0
     last_confirmed_at: str = ""
+    entity_type: Optional[EntityType] = None
+    memory_tier: Optional[MemoryTier] = None
 
     def reinforce(self) -> None:
         """Increment reinforcement count and boost confidence. Called on human approval."""
@@ -56,3 +72,15 @@ class Chunk:
             return max(0.1, self.confidence * (0.95 ** (days_since / 30)))
         except ValueError:
             return self.confidence
+
+
+@dataclass
+class SearchResult:
+    chunk: Chunk
+    rrf_score: float
+    fused_score: float
+    age_days: float = 0.0
+    is_stale: bool = False
+    dense_rank: Optional[int] = None
+    bm25_rank: Optional[int] = None
+    bm25_score: float = 0.0

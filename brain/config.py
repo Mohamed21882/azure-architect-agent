@@ -29,6 +29,12 @@ class BrainConfig:
     # --- BM25 persistence ---
     bm25_index_path: str = ""
 
+    # --- Temporal decay half-lives (days) ---
+    half_life_region_availability: int = 30
+    half_life_api_docs: int = 60
+    half_life_architecture: int = 180
+    half_life_procedural: int = 365
+
     def __post_init__(self) -> None:
         if not self.bm25_index_path:
             self.bm25_index_path = os.path.join(

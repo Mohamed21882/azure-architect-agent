@@ -12,6 +12,7 @@ import streamlit.components.v1 as components
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from brain.config import CONFIG
+from brain.models import SearchResult
 from brain.search.bm25_index import BM25Index
 from brain.search.hybrid_search import hybrid_search
 from brain.db.database import (
@@ -53,6 +54,7 @@ st.markdown("""
     }
     .chunk-score { color: #50e6ff; font-weight: 600; }
     .chunk-repo  { color: #a0a0a0; }
+    .stale-badge { color: #ffa500; font-size: 0.78em; font-weight: 600; margin-left: 6px; }
     .guest-banner {
         background: #1a1a2e; border: 1px solid #444; border-radius: 6px;
         padding: 8px 14px; margin-bottom: 12px; font-size: 0.88em;
@@ -123,7 +125,7 @@ def get_brain_context(
     query: str,
     bm25: BM25Index,
     reinforce: bool = False,
-) -> tuple[str, list[dict]]:
+) -> tuple[str, list[SearchResult]]:
     if bm25 is None:
         return "[Brain index unavailable — no retrieval context]\n", []
     try:
@@ -133,11 +135,12 @@ def get_brain_context(
 
     lines = ["--- RETRIEVED CONTEXT (TE-1 Brain · hybrid search) ---\n"]
     for i, h in enumerate(hits, 1):
-        content = h.get("content", "")[:800].replace("\n", " ").strip()
+        content = h.chunk.content[:800].replace("\n", " ").strip()
+        stale_note = " [STALE]" if h.is_stale else ""
         lines.append(
-            f"[{i}] Title:  {h.get('title', 'Untitled')}\n"
-            f"    Source: {h.get('source_repo', '')}\n"
-            f"    Score:  {h.get('rrf_score', 0):.5f}\n"
+            f"[{i}] Title:  {h.chunk.title or 'Untitled'}{stale_note}\n"
+            f"    Source: {h.chunk.source_repo}\n"
+            f"    Score:  {h.fused_score:.5f}\n"
             f"    Text:   {content}\n"
         )
     lines.append("--- END CONTEXT ---\n")
@@ -761,14 +764,15 @@ def update_brain_context() -> None:
         if hits:
             st.caption(f"{len(hits)} chunks retrieved")
             for i, h in enumerate(hits, 1):
-                title = h.get("title", "Untitled")[:55]
-                repo  = h.get("source_repo", "")
-                score = h.get("rrf_score", 0)
+                title = (h.chunk.title or "Untitled")[:55]
+                repo  = h.chunk.source_repo
+                score = h.fused_score
+                stale_html = '<span class="stale-badge">⚠️ Stale</span>' if h.is_stale else ""
                 st.markdown(
                     f'<div class="chunk-card">'
-                    f"<strong>[{i}] {title}</strong><br>"
+                    f"<strong>[{i}] {title}</strong>{stale_html}<br>"
                     f'<span class="chunk-repo">{repo}</span>&nbsp;&nbsp;'
-                    f'<span class="chunk-score">RRF {score:.5f}</span>'
+                    f'<span class="chunk-score">Score {score:.5f}</span>'
                     f"</div>",
                     unsafe_allow_html=True,
                 )
@@ -841,9 +845,9 @@ def _save_eval_and_update_chunks(
 ) -> None:
     """Persist evaluation and propagate feedback to chunk confidence scores."""
     chunk_ids = [
-        h.get("chunk_id", "")
+        h.chunk.chunk_id
         for h in st.session_state.get("last_hits", [])
-        if h.get("chunk_id")
+        if h.chunk.chunk_id
     ]
     last_assist = next(
         (msg["content"] for msg in reversed(st.session_state.get("llm_history", []))
