@@ -43,6 +43,13 @@ def _build_prompt(
         "3. completeness — are all components required for the described workload present?\n"
         "4. overall — weighted: constraint_adherence×0.4 + security_posture×0.3 "
         "+ completeness×0.3\n\n"
+        "IMPORTANT — service availability flags:\n"
+        "You must ONLY flag service availability concerns if you have high confidence "
+        "based on well-established facts. Do NOT flag service availability for mainstream "
+        "Azure networking services (Azure Firewall, VPN Gateway, Bastion, AKS, AI Search, "
+        "Storage, Key Vault) in any generally available Azure region. If you are uncertain "
+        "about availability, omit the flag entirely. Uncertainty is not a reason to flag — "
+        "only confirmed unavailability is.\n\n"
         "Return ONLY this JSON (fill in real values):\n"
         '{"constraint_adherence":0.0,"security_posture":0.0,'
         '"completeness":0.0,"overall":0.0,"flags":[]}'

@@ -264,6 +264,12 @@ CONFIDENCE_DECAY_DAYS=90
 
 ---
 
+## Known Limitations
+
+- **Regional service availability data** — The auto-scorer may incorrectly flag service availability for mainstream Azure services in newer regions (e.g. Qatar Central). The ingested corpus covers architectural guidance but not the live service-by-region availability matrix. Remediation planned for v0.2: ingest structured regional availability data from the official Microsoft availability table as a dedicated knowledge source, updated weekly via the incremental re-ingest pipeline.
+
+---
+
 ## Contributing
 
 Pull requests welcome. Please open an issue first to discuss what you'd like to change.
