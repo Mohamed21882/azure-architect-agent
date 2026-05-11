@@ -1,10 +1,11 @@
-"""local_reader.py — walk the 4 Microsoft raw-source directories and yield RawDocument objects.
+"""local_reader.py — walk the raw-source directories and yield RawDocument objects.
 
 Sources configured in BrainConfig.source_dirs:
-  architecture-center  raw/architecture-center          (all .md recursively)
-  azure-ai             raw/azure-ai                     (all .md recursively)
-  azure-foundry        raw/azure-foundry/articles/foundry  (Foundry-specific only)
-  cli                  raw/cli                          (all .md recursively)
+  architecture-center  raw/architecture-center               (all .md recursively)
+  azure-ai             raw/azure-ai                          (all .md recursively)
+  azure-foundry        raw/azure-foundry/articles/foundry    (Foundry-specific only)
+  cli                  raw/cli                               (all .md recursively)
+  region-availability  raw/region-availability               (regional service availability)
 
 All documents are tagged with IngestSource.MICROSOFT_LEARN.
 """
@@ -44,8 +45,19 @@ def _extract_title(content: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def walk_source(source_repo: str, root_dir: str) -> Iterator[RawDocument]:
+def walk_source(
+    source_repo: str,
+    root_dir: str,
+    extra_metadata: dict | None = None,
+) -> Iterator[RawDocument]:
     """Recursively yield one RawDocument per .md file under root_dir.
+
+    Args:
+        source_repo:    Logical name for this source (stored in source_repo field).
+        root_dir:       Root directory to walk recursively.
+        extra_metadata: Optional dict merged into each RawDocument's metadata.
+                        Use for source-level tags such as
+                        {"source_type": "region_availability", "priority": "high"}.
 
     Skips:
       - Non-existent or empty directories.
@@ -53,10 +65,12 @@ def walk_source(source_repo: str, root_dir: str) -> Iterator[RawDocument]:
       - Files whose cleaned content is shorter than 50 characters (stubs /
         redirect manifests masquerading as .md).
     """
-    if not os.path.isdir(root_dir):
+    if not os.path.isdir(str(root_dir)):
         return
 
-    for dirpath, _dirs, filenames in os.walk(root_dir):
+    base_meta = extra_metadata or {}
+
+    for dirpath, _dirs, filenames in os.walk(str(root_dir)):
         for fname in sorted(filenames):
             if not fname.endswith(".md"):
                 continue
@@ -87,16 +101,22 @@ def walk_source(source_repo: str, root_dir: str) -> Iterator[RawDocument]:
                 metadata={
                     "repo":     source_repo,
                     "filename": fname,
-                    # Relative path within the repo root — useful for display
-                    "rel_path": os.path.relpath(fpath, root_dir),
+                    "rel_path": os.path.relpath(fpath, str(root_dir)),
+                    **base_meta,
                 },
             )
+
+
+_SOURCE_METADATA: dict[str, dict] = {
+    "region-availability": {"source_type": "region_availability", "priority": "high"},
+}
 
 
 def read_all_sources(
     config: BrainConfig,
 ) -> Iterator[tuple[str, RawDocument]]:
-    """Yield (source_repo_name, RawDocument) for every .md file across all 4 sources."""
+    """Yield (source_repo_name, RawDocument) for every .md file across all sources."""
     for repo_name, root_dir in config.source_dirs.items():
-        for doc in walk_source(repo_name, root_dir):
+        extra = _SOURCE_METADATA.get(repo_name)
+        for doc in walk_source(repo_name, root_dir, extra_metadata=extra):
             yield repo_name, doc

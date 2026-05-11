@@ -1,5 +1,8 @@
-# Raw documentation corpus
-raw/
+# Raw documentation corpus (large Microsoft repos — not versioned)
+raw/*
+# Exception: curated hand-authored knowledge sources are small and versioned
+!raw/region-availability
+!raw/region-availability/**
 
 # Local data directories
 data/

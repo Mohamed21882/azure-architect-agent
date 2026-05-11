@@ -36,14 +36,19 @@ class BrainConfig:
             )
 
     @property
+    def region_availability_dir(self) -> str:
+        return os.path.join(self.wiki_root, "raw", "region-availability")
+
+    @property
     def source_dirs(self) -> dict[str, str]:
         """Mapping of logical repo name → root directory to walk."""
         r = self.wiki_root
         return {
-            "architecture-center": os.path.join(r, "raw", "architecture-center"),
-            "azure-ai":            os.path.join(r, "raw", "azure-ai"),
-            "azure-foundry":       os.path.join(r, "raw", "azure-foundry", "articles", "foundry"),
-            "cli":                 os.path.join(r, "raw", "cli"),
+            "architecture-center":  os.path.join(r, "raw", "architecture-center"),
+            "azure-ai":             os.path.join(r, "raw", "azure-ai"),
+            "azure-foundry":        os.path.join(r, "raw", "azure-foundry", "articles", "foundry"),
+            "cli":                  os.path.join(r, "raw", "cli"),
+            "region-availability":  os.path.join(r, "raw", "region-availability"),
         }
 
 

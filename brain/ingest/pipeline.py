@@ -7,6 +7,13 @@ Flow per repo:
       → vector_store.upsert_chunks()    (Qdrant, batches of 256)
       → bm25_index.BM25Index.add()      (in-memory, persisted at end)
 
+Sources ingested (configured in BrainConfig.source_dirs):
+  architecture-center   raw/architecture-center
+  azure-ai              raw/azure-ai
+  azure-foundry         raw/azure-foundry/articles/foundry
+  cli                   raw/cli
+  region-availability   raw/region-availability   [priority:high — regional service availability]
+
 Run:
     python -m brain.ingest.pipeline
     python -m brain.ingest.pipeline --incremental
