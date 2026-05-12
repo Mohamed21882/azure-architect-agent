@@ -17,7 +17,8 @@ brain/store/te1.db
 .smart-env/
 
 # Claude Code session data (private conversation history)
-.claude/
+.claude/*
+!.claude/commands/
 
 # Obsidian trash
 .trash/
