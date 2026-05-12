@@ -55,6 +55,55 @@ The target user is an **Azure admin who lacks architectural expertise** — not 
 
 ---
 
+## Quick Start
+
+> [!IMPORTANT]
+> **Prerequisites:** Python 3.11+ · Docker · Ollama · Git
+
+**1. Clone the repo**
+```bash
+git clone https://github.com/Mohamed21882/azure-architect-agent.git
+cd azure-architect-agent
+```
+
+**2. Set up the Python environment**
+```bash
+python -m venv venv && source venv/bin/activate && pip install -r requirements.txt
+```
+
+**3. Clone the 4 Microsoft source repos into `raw/`**
+```bash
+mkdir -p raw && cd raw
+git clone https://github.com/MicrosoftDocs/architecture-center.git architecture-center
+git clone https://github.com/MicrosoftDocs/azure-ai-docs.git azure-ai
+git clone https://github.com/MicrosoftDocs/azure-ai-docs.git azure-foundry
+git clone https://github.com/MicrosoftDocs/azure-docs-cli.git cli
+cd ..
+```
+
+**4. Copy `.env.example` to `.env`**
+```bash
+cp .env.example .env
+```
+
+**5. Pull the embedding model**
+```bash
+ollama pull nomic-embed-text
+```
+
+**6. Run the ingest pipeline** *(~40 min, produces 63k+ chunks)*
+```bash
+PYTHONPATH=. venv/bin/python -m brain.ingest.pipeline
+```
+
+**7. Launch TE-1**
+```bash
+./start.sh
+```
+The terminal will print your network access URL (e.g. `http://192.168.x.x:8501`).
+
+---
+
 ## Features
 
 | Feature | Status |
