@@ -142,6 +142,17 @@ Session state keys: `mode`, `user_id`, `llm_history`, `chat_display`, `last_hits
 
 ---
 
+## How to Run
+
+| Action | Command |
+|---|---|
+| Start | `cd ~/Azure-Architect-Wiki && ./start.sh` |
+| Stop | `./stop.sh` |
+| Access URL | http://192.168.18.31:8501 |
+| Claude Code | `cd ~/Azure-Architect-Wiki && claude` |
+
+---
+
 ## Patterns to Know
 
 - **`upsert_chunks` with `embedding=None`** uses `set_payload()` — safe for confidence-only updates without re-embedding
