@@ -291,25 +291,32 @@ CONFIDENCE_DECAY_DAYS=90
 ### v0.1 — Alpha (current)
 - [x] Full ingest pipeline (5,816 docs → 63k chunks)
 - [x] Hybrid search (BM25 + vector + RRF)
-- [x] Architecture generation with Mermaid diagrams
-- [x] Bicep template generation
-- [x] Iterative refinement chat
-- [x] User authentication + saved architectures
+- [x] Architecture generation with Mermaid diagrams with semantic colour coding
+- [x] Bicep template generation (on approval only)
+- [x] Iterative refinement chat with full conversation history
+- [x] User authentication + saved architectures (SQLite)
 - [x] Guest mode
+- [x] LLM Wiki V2: session crystallisation, chunk reinforcement, Ebbinghaus confidence decay
+- [x] Incremental re-ingest with supersession
+- [x] Temporal reranking layer (freshness boost, staleness detection, per-source half-life decay)
+- [x] Evaluation system: auto-scorer, human feedback (👍/👎), chunk confidence updates
+- [x] Evals dashboard
+- [x] Regional availability knowledge source (Qatar Central + UAE North)
+- [x] One-command launch via start.sh / stop.sh
 
-### v0.2 — LLM Wiki V2
-- [ ] Chunk reinforcement on retrieval
-- [ ] Session crystallisation → wiki pages
-- [ ] Incremental re-ingest with supersession
-- [ ] Confidence decay scheduler
-- [ ] Architecture quality scoring
-
-### v0.3 — Deploy
-- [ ] Azure execution engine (Bicep → live deployment)
-- [ ] Scoped Service Principal model
+### v0.2 — Deploy (next)
+- [ ] Azure execution engine: Bicep → live deployment via scoped Service Principal
 - [ ] Programmatic HITL approval gate
 - [ ] Deployment audit log
 - [ ] Drift detection
+- [ ] Regional availability data weekly auto-update
+
+### v0.3 — Scale
+- [ ] Multi-tenant isolation (per-tenant vector namespaces, credential vaults)
+- [ ] Graph traversal search (third search stream)
+- [ ] Wiki-lint metabolism (scheduled contradiction detection)
+- [ ] MSP white-label support
+- [ ] Azure Marketplace listing
 
 ---
 
