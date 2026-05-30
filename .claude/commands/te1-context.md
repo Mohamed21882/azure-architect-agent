@@ -31,6 +31,7 @@ Project root: ~/Azure-Architect-Wiki
 - Ollama local LLMs (mistral-small, qwen3.5, qwen3:14b) for dev/testing
 - External APIs: Claude, OpenAI, OpenRouter, Gemini (for production)
 - Docker (Qdrant container named te1-qdrant)
+- mcp==1.27.1 (Microsoft Learn MCP Server client)
 
 ## Directory Structure
 
@@ -38,7 +39,7 @@ Project root: ~/Azure-Architect-Wiki
 ~/Azure-Architect-Wiki/
 ├── brain/
 │   ├── models.py              # Chunk, RawDocument, SearchResult, WikiPage, IngestRun
-│   ├── config.py              # Settings, half-life constants, use_learn_mcp flag
+│   ├── config.py              # Settings, half-life constants, use_learn_mcp flag, learn_mcp_url
 │   ├── ingest/
 │   │   ├── chunker.py         # Token-aware heading-based chunker
 │   │   ├── embedder.py        # nomic-embed-text via Ollama /api/embed
@@ -47,17 +48,17 @@ Project root: ~/Azure-Architect-Wiki
 │   ├── search/
 │   │   ├── bm25_index.py      # BM25Okapi, persisted to brain/store/bm25.pkl
 │   │   ├── hybrid_search.py   # RRF fusion, temporal reranking, reinforcement
-│   │   └── learn_mcp.py       # Microsoft Learn MCP Server live retrieval (NEW)
+│   │   └── learn_mcp.py       # Microsoft Learn MCP Server live retrieval
 │   ├── store/
 │   │   └── vector_store.py    # Qdrant wrapper, upsert, set_payload, supersession
 │   ├── wiki/
 │   │   └── crystalliser.py    # Session → wiki/semantic/*.md + re-ingest
 │   ├── eval/
-│   │   └── auto_scorer.py     # Architecture quality scorer, 4 dimensions
+│   │   └── auto_scorer.py     # Architecture quality scorer, structured flags, context_chunks grounding
 │   └── db/
 │       └── database.py        # SQLite: users, architectures, sessions, evaluations, chunk_feedback_log
 ├── ui/
-│   ├── app.py                 # Full Streamlit portal (1045+ lines)
+│   ├── app.py                 # Full Streamlit portal (1300+ lines)
 │   └── pages/
 │       └── evals_dashboard.py # Evaluation metrics dashboard
 ├── wiki/
@@ -80,8 +81,8 @@ Project root: ~/Azure-Architect-Wiki
 ├── .claude.md                 # Agent constitution (AGENTS.md)
 ├── .env / .env.example        # Config (gitignored)
 ├── requirements.txt
-├── start.sh                   # Starts Qdrant + Streamlit, prints LAN IP
-└── stop.sh                    # Stops Qdrant container + Streamlit
+├── start.sh                   # Starts Qdrant + Streamlit, prints LAN IP — confirmed working
+└── stop.sh                    # Stops Qdrant container + Streamlit — confirmed working
 ```
 
 ## Knowledge Base State
@@ -107,9 +108,14 @@ Project root: ~/Azure-Architect-Wiki
 12. Brain Context sidebar — shows retrieved chunks with RRF scores after every generation
 13. Regional availability knowledge — Qatar Central + UAE North verified and ingested
 14. Microsoft Fabric WAF knowledge — 6 pages ingested
-15. Microsoft Learn MCP Server — live retrieval layer at https://learn.microsoft.com/api/mcp (learn_mcp.py), parallel to local brain, fused in LLM prompt, shown in sidebar as "🌐 Microsoft Learn Live"
-16. start.sh / stop.sh — one-command launch, auto-detects LAN IP
-17. /te1-context slash command — this file
+15. Microsoft Learn MCP Server — brain/search/learn_mcp.py; query_learn_mcp() connects to https://learn.microsoft.com/api/mcp via mcp.client.streamable_http; runs in parallel with hybrid_search() via ThreadPoolExecutor(max_workers=2); 1-hour in-memory cache per query; 5-second timeout with asyncio.wait_for; silent fallback (returns [] on any error, never raises); response format {"results":[{title,content,contentUrl}]}; fused into LLM prompt under "## Live API Reference" header; shown in sidebar as "🌐 Microsoft Learn Live"; config.use_learn_mcp=True, config.learn_mcp_url set
+16. Issues UX redesign — render_issues() function in ui/app.py; groups by severity: 🔴 Critical / 🟡 Medium always visible, 🔵 Minor notes collapsed in st.expander; human-readable category labels (_CATEGORY_LABELS dict); "💡 Fix this" button for actionable categories (budget_risk, incomplete_specification, operational_gap, wrong_service_behaviour, constraint_violation) with pre-built refinement message templates; "📋 Note" label for non-fixable issues; summary line above ("✅ No issues" or "⚠️ N issues found")
+17. Auto-fix handler — clicking "💡 Fix this" sets auto_fix_triggered=True + auto_fix_message in session state then reruns; on next rerun the handler between st.chat_input and the refinement processor picks it up and routes through the exact same LLM pipeline as a typed refinement (same Brain context fetch, same SYSTEM_ARCH, same history management)
+18. max_tokens=4096 for architecture generation — both initial generation and refinement calls use _llm(max_tokens=4096, temperature=0.2); Bicep stays at max_tokens=-1
+19. Auto-scorer structured flags — scorer prompt updated to request {"severity":"critical|medium|low","category":"budget_risk|...","message":"plain English"} objects; _parse() normalises plain-string flags to dicts for backward compat
+20. Auto-scorer grounded in regional availability chunks — score_architecture() accepts context_chunks: list[dict] | None = None; app.py filters last_hits for source_repo containing "region-availability" and passes as {"text":..., "title":...} dicts; prepended to scorer prompt under "## Verified Regional Knowledge (use this as ground truth)"
+21. Azure OpenAI Qatar Central false flag fixed — explicit hard instruction added to scorer prompt: "Azure OpenAI IS available in Qatar Central (qatarcentral) — this is confirmed. Do NOT flag Azure OpenAI availability in Qatar Central as uncertain or unconfirmed. Qatar Central is a supported Microsoft Foundry project region with Azure OpenAI GA."
+22. start.sh / stop.sh — confirmed working one-command launch, auto-detects LAN IP
 
 ## What Is NOT Built Yet (v0.2 Targets)
 
@@ -133,11 +139,15 @@ Project root: ~/Azure-Architect-Wiki
 - Quarantine threshold is 3 flags — chunk.quarantined=1 after 3 negative flags from technical categories
 - inject_mermaid_styles() strips all LLM-generated classDef lines and injects canonical 6-class semantic colour system: network(blue), security(green), compute(purple), storage(orange), monitor(yellow), dns(cyan)
 - temperature=0.2 for architecture generation and refinement; temperature=1.0 (default) for Bicep generation
+- max_tokens=4096 for architecture generation/refinement; max_tokens=-1 (unlimited) for Bicep
 - _do_approve() is the single canonical approve path — called from both Approve button and "Skip and Approve →"
-- Learn MCP falls back silently on timeout/error — never blocks generation
+- Learn MCP falls back silently on timeout/error — never blocks generation; asyncio.run() safe in ThreadPoolExecutor threads
 - Auto-scorer must NOT flag mainstream Azure services (Firewall, VPN Gateway, Bastion, AKS, AI Search, Storage, Key Vault) as unavailable in any GA region without confirmed evidence
+- Azure OpenAI IS confirmed available in Qatar Central — do not re-add a flag for it
 - Azure Firewall, Bastion, VPN Gateway all require public IPs by design — this is NOT a constraint violation
 - "Hub VNet: No" means CREATE a new hub, not omit the hub
+- Auto-fix buttons in render_issues() use key=f"fix_{idx}" — idx is global across critical+medium+low groups to avoid key collisions
+- get_brain_context() returns tuple[str, list[SearchResult], list[dict]] — third element is learn_hits; all three call sites must unpack all three values
 
 ## Commercial Status
 
@@ -145,12 +155,18 @@ Project root: ~/Azure-Architect-Wiki
 - LinkedIn post: published
 - Paddle registration: started but paused (needs 4 pages on tensoredge.net first)
 - Microsoft Partner Centre: registration started (needs work account for Commercial Marketplace enrollment)
-- tensoredge.net: WordPress, hosted locally on X1 Pro (need to locate WordPress root)
+- tensoredge.net: WordPress, hosted locally on X1 Pro (WordPress root directory not yet located)
 - Hackathon: Microsoft Agents League — registration deadline June 12, submission June 4-14, $55k prizes, targeting Reasoning Agents track
 
 ## Pending Questions Not Yet Resolved
 
-1. What is the Hermes agent on tensoredge.net?
-2. WordPress root directory path on X1 Pro (docker ps / find /srv needed)
-3. Static or dynamic public IP on X1 Pro?
-4. Public URL/domain for TE-1 customers (te1.tensoredge.net?)
+1. WordPress root directory still unknown (docker ps / find /srv needed on X1 Pro)
+2. Hermes agent on tensoredge.net still unexplained
+3. Public URL for TE-1 customers not yet decided (te1.tensoredge.net?)
+4. Static vs dynamic public IP on X1 Pro not confirmed
+
+## Next Session Priorities
+
+1. tensoredge.net commercial pages — locate WordPress root, build pricing/ToS/privacy/refund pages, complete Paddle registration
+2. Deploy engine design — design here in chat first, then implement in Claude Code
+3. Hackathon submission prep — deadline June 14
