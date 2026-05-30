@@ -29,6 +29,10 @@ class BrainConfig:
     # --- BM25 persistence ---
     bm25_index_path: str = ""
 
+    # --- Microsoft Learn MCP ---
+    use_learn_mcp: bool = True
+    learn_mcp_url: str = "https://learn.microsoft.com/api/mcp"
+
     # --- Temporal decay half-lives (days) ---
     half_life_region_availability: int = 30
     half_life_api_docs: int = 60

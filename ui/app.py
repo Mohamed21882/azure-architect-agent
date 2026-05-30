@@ -4,6 +4,7 @@ import re
 import time
 import json
 import uuid
+import concurrent.futures
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -15,6 +16,7 @@ from brain.config import CONFIG
 from brain.models import SearchResult
 from brain.search.bm25_index import BM25Index
 from brain.search.hybrid_search import hybrid_search
+from brain.search.learn_mcp import query_learn_mcp
 from brain.db.database import (
     init_db,
     create_user,
@@ -125,26 +127,72 @@ def get_brain_context(
     query: str,
     bm25: BM25Index,
     reinforce: bool = False,
-) -> tuple[str, list[SearchResult]]:
-    if bm25 is None:
-        return "[Brain index unavailable — no retrieval context]\n", []
-    try:
-        hits = hybrid_search(query, bm25, CONFIG, top_k=6, reinforce=reinforce)
-    except Exception as exc:
-        return f"[Brain unavailable: {exc}]\n", []
+) -> tuple[str, list[SearchResult], list[dict]]:
+    local_hits: list[SearchResult] = []
+    learn_hits: list[dict] = []
+    brain_err = ""
 
-    lines = ["--- RETRIEVED CONTEXT (TE-1 Brain · hybrid search) ---\n"]
-    for i, h in enumerate(hits, 1):
-        content = h.chunk.content[:800].replace("\n", " ").strip()
-        stale_note = " [STALE]" if h.is_stale else ""
-        lines.append(
-            f"[{i}] Title:  {h.chunk.title or 'Untitled'}{stale_note}\n"
-            f"    Source: {h.chunk.source_repo}\n"
-            f"    Score:  {h.fused_score:.5f}\n"
-            f"    Text:   {content}\n"
+    if bm25 is not None and CONFIG.use_learn_mcp:
+        # Thread 1: local Brain, Thread 2: Microsoft Learn MCP — parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            brain_f = ex.submit(
+                hybrid_search, query, bm25, CONFIG, top_k=6, reinforce=reinforce
+            )
+            learn_f = ex.submit(query_learn_mcp, query)
+            try:
+                local_hits = brain_f.result(timeout=30.0)
+            except Exception as exc:
+                brain_err = f"[Brain unavailable: {exc}]\n"
+            try:
+                learn_hits = learn_f.result(timeout=7.0)
+            except Exception:
+                learn_hits = []
+
+    elif bm25 is not None:
+        try:
+            local_hits = hybrid_search(query, bm25, CONFIG, top_k=6, reinforce=reinforce)
+        except Exception as exc:
+            brain_err = f"[Brain unavailable: {exc}]\n"
+
+    elif CONFIG.use_learn_mcp:
+        brain_err = "[Brain index unavailable — no retrieval context]\n"
+        learn_hits = query_learn_mcp(query)
+
+    else:
+        brain_err = "[Brain index unavailable — no retrieval context]\n"
+
+    # Build Brain section for LLM prompt
+    if brain_err:
+        brain_section = (
+            "## Architecture Knowledge (TE-1 Brain — curated, confidence-scored)\n"
+            f"{brain_err}"
         )
-    lines.append("--- END CONTEXT ---\n")
-    return "\n".join(lines), hits
+    else:
+        lines = ["## Architecture Knowledge (TE-1 Brain — curated, confidence-scored)\n"]
+        for i, h in enumerate(local_hits, 1):
+            content = h.chunk.content[:800].replace("\n", " ").strip()
+            stale_note = " [STALE]" if h.is_stale else ""
+            lines.append(
+                f"[{i}] Title:  {h.chunk.title or 'Untitled'}{stale_note}\n"
+                f"    Source: {h.chunk.source_repo}\n"
+                f"    Score:  {h.fused_score:.5f}\n"
+                f"    Text:   {content}\n"
+            )
+        lines.append("--- END CONTEXT ---\n")
+        brain_section = "\n".join(lines)
+
+    # Build Learn MCP section for LLM prompt
+    if learn_hits:
+        learn_lines = ["\n## Live API Reference (Microsoft Learn — always current)\n"]
+        for r in learn_hits:
+            learn_lines.append(
+                f"Title: {r['title']}\nURL: {r['url']}\n{r['snippet'][:600]}\n"
+            )
+        learn_section = "\n".join(learn_lines)
+    else:
+        learn_section = ""
+
+    return brain_section + learn_section, local_hits, learn_hits
 
 
 # ── LLM ────────────────────────────────────────────────────────────────────
@@ -491,6 +539,7 @@ def _reset_arch_state() -> None:
     st.session_state.llm_history            = []
     st.session_state.chat_display           = []
     st.session_state.last_hits              = []
+    st.session_state.last_learn_hits        = []
     st.session_state.architecture_generated = False
     st.session_state.form_values            = {}
     st.session_state.approved_bicep         = None
@@ -534,6 +583,7 @@ def _load_arch_into_session(arch_id: int) -> None:
     )
     st.session_state.show_deploy_msg        = False
     st.session_state.last_hits              = []
+    st.session_state.last_learn_hits        = []
     st.session_state.show_save_input        = False
     st.session_state.arch_saved             = True  # already persisted
     st.session_state.eval_rating            = None
@@ -638,6 +688,7 @@ _defaults: dict = {
     "llm_history":              [],
     "chat_display":             [],
     "last_hits":                [],
+    "last_learn_hits":          [],
     "architecture_generated":   False,
     "form_values":              {},
     "approved_bicep":           None,
@@ -692,10 +743,12 @@ with st.sidebar:
         else:
             st.warning("Brain index not loaded.")
 
-    # ── Brain Context placeholder — populated by update_brain_context() ────
+    # ── Brain Context placeholders — populated by update_brain_context() ───
     st.divider()
     st.subheader("🧠 Brain Context")
     brain_ctx_container = st.sidebar.container()
+    st.subheader("🌐 Microsoft Learn Live")
+    learn_ctx_container = st.sidebar.container()
 
     # ── Evals Dashboard link ──────────────────────────────────────────────
     st.divider()
@@ -758,7 +811,7 @@ def _llm(max_tokens: int = 8192, temperature: float = 1.0) -> dict:
 
 
 def update_brain_context() -> None:
-    """Write current Brain Context hits into the sidebar container."""
+    """Write current Brain Context hits into the sidebar containers."""
     hits = st.session_state.get("last_hits", [])
     with brain_ctx_container:
         if hits:
@@ -779,6 +832,21 @@ def update_brain_context() -> None:
         else:
             st.caption("No query run yet.")
 
+    learn_hits = st.session_state.get("last_learn_hits", [])
+    with learn_ctx_container:
+        if learn_hits:
+            for r in learn_hits:
+                title = r.get("title", "Microsoft Learn")[:60]
+                url   = r.get("url", "")
+                snip  = r.get("snippet", "")[:100]
+                st.markdown(
+                    f"**{title}**  \n"
+                    f"[{url[:70]}]({url})  \n"
+                    f"_{snip}_"
+                )
+        else:
+            st.caption("⚠️ Live docs unavailable")
+
 
 update_brain_context()  # populate from session state on every rerun
 
@@ -794,7 +862,7 @@ def _do_approve() -> None:
         f"{fv_approve.get('region', '')} architecture"
     )
     with st.spinner("🔍 Reinforcing Brain…"):
-        _, reinforce_hits = get_brain_context(approve_query, bm25, reinforce=True)
+        _, reinforce_hits, _ = get_brain_context(approve_query, bm25, reinforce=True)
         if reinforce_hits:
             st.session_state.last_hits = reinforce_hits
             update_brain_context()
@@ -971,8 +1039,9 @@ if submit:
 
     query = f"{description} {compliance} Azure {region} architecture"
     with st.spinner("🔍 Consulting Brain…"):
-        context_block, hits = get_brain_context(query, bm25)
+        context_block, hits, learn_hits = get_brain_context(query, bm25)
         st.session_state.last_hits = hits
+        st.session_state.last_learn_hits = learn_hits
         update_brain_context()
 
     user_msg = build_initial_prompt(fv, context_block)
@@ -1028,8 +1097,9 @@ if st.session_state.architecture_generated:
 
     if refinement:
         with st.spinner("🔍 Consulting Brain…"):
-            context_block, hits = get_brain_context(refinement, bm25)
+            context_block, hits, learn_hits = get_brain_context(refinement, bm25)
             st.session_state.last_hits = hits
+            st.session_state.last_learn_hits = learn_hits
             update_brain_context()
 
         refine_llm_msg = (
