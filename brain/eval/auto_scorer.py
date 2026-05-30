@@ -50,9 +50,17 @@ def _build_prompt(
         "Storage, Key Vault) in any generally available Azure region. If you are uncertain "
         "about availability, omit the flag entirely. Uncertainty is not a reason to flag — "
         "only confirmed unavailability is.\n\n"
+        "Each flag must be a JSON object with:\n"
+        '  "severity": "critical" | "medium" | "low"\n'
+        '  "category": one of "budget_risk", "incomplete_specification", "operational_gap", '
+        '"wrong_service_behaviour", "wrong_region_availability", "constraint_violation"\n'
+        '  "message": one plain English sentence — no JSON, no markdown, no code\n'
+        "Severity guide: critical = constraint violation or confirmed wrong region; "
+        "medium = budget risk, service config issue, or operational gap; low = minor note.\n\n"
         "Return ONLY this JSON (fill in real values):\n"
         '{"constraint_adherence":0.0,"security_posture":0.0,'
-        '"completeness":0.0,"overall":0.0,"flags":[]}'
+        '"completeness":0.0,"overall":0.0,'
+        '"flags":[{"severity":"medium","category":"budget_risk","message":"plain English"}]}'
     )
 
 
@@ -149,12 +157,20 @@ def _parse(raw: str) -> dict:
         if not match:
             return dict(_FALLBACK)
         data = json.loads(match.group())
+        # Normalize flags to list of dicts regardless of what the LLM returned
+        raw_flags = data.get("flags", [])
+        flags: list[dict] = []
+        for f in raw_flags:
+            if isinstance(f, dict):
+                flags.append(f)
+            elif isinstance(f, str) and f.strip():
+                flags.append({"severity": "medium", "category": "operational_gap", "message": f})
         result = {
             "constraint_adherence": float(data.get("constraint_adherence", 0.5)),
             "security_posture":     float(data.get("security_posture",     0.5)),
             "completeness":         float(data.get("completeness",         0.5)),
             "overall":              float(data.get("overall",              0.5)),
-            "flags":                data.get("flags", []),
+            "flags":                flags,
         }
         for k in ("constraint_adherence", "security_posture", "completeness", "overall"):
             result[k] = max(0.0, min(1.0, result[k]))

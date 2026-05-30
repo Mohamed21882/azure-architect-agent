@@ -551,6 +551,8 @@ def _reset_arch_state() -> None:
     st.session_state.eval_submitted         = False
     st.session_state.eval_session_id        = str(uuid.uuid4())
     st.session_state.auto_scores            = None
+    st.session_state.auto_fix_triggered     = False
+    st.session_state.auto_fix_message       = ""
 
 
 def _load_arch_into_session(arch_id: int) -> None:
@@ -701,6 +703,8 @@ _defaults: dict = {
     "eval_submitted":           False,
     "eval_session_id":          "",
     "auto_scores":              None,
+    "auto_fix_triggered":       False,
+    "auto_fix_message":         "",
 }
 for _k, _v in _defaults.items():
     if _k not in st.session_state:
@@ -849,6 +853,103 @@ def update_brain_context() -> None:
 
 
 update_brain_context()  # populate from session state on every rerun
+
+
+# ── Issues display ─────────────────────────────────────────────────────────
+
+_CATEGORY_LABELS: dict[str, str] = {
+    "budget_risk":              "Budget Risk",
+    "incomplete_specification": "Incomplete Specification",
+    "operational_gap":          "Operational Gap",
+    "wrong_service_behaviour":  "Service Configuration",
+    "wrong_region_availability": "Regional Availability",
+    "constraint_violation":     "Constraint Violation",
+}
+_SEVERITY_ICON: dict[str, str] = {
+    "critical": "🔴",
+    "medium":   "🟡",
+    "low":      "🔵",
+}
+
+
+def render_issues(issues: list, form_values: dict) -> None:
+    """Render auto-scorer issues as human-readable cards with auto-fix buttons."""
+    # Normalize — support both dict flags (new) and plain strings (backward compat)
+    normalized: list[dict] = []
+    for iss in issues:
+        if isinstance(iss, dict):
+            normalized.append(iss)
+        elif isinstance(iss, str) and iss.strip():
+            normalized.append({"severity": "medium", "category": "operational_gap", "message": iss})
+
+    if not normalized:
+        st.success("✅ No issues found — architecture looks good")
+        return
+
+    n = len(normalized)
+    st.warning(f"⚠️ {n} issue{'s' if n != 1 else ''} found — review before approving")
+
+    critical = [i for i in normalized if i.get("severity") == "critical"]
+    medium   = [i for i in normalized if i.get("severity") == "medium"]
+    low      = [i for i in normalized if i.get("severity") not in ("critical", "medium")]
+
+    def _card(issue: dict, idx: int) -> None:
+        severity = issue.get("severity", "medium")
+        category = issue.get("category", "operational_gap")
+        message  = issue.get("message", "")
+        icon     = _SEVERITY_ICON.get(severity, "🟡")
+        label    = _CATEGORY_LABELS.get(category, category.replace("_", " ").title())
+
+        if category == "budget_risk":
+            fix_msg: str | None = (
+                f"Reduce the architecture cost to fit within "
+                f"{form_values.get('budget', 'the specified')} budget. "
+                f"Remove or replace the most expensive optional components (Firewall, Bastion) "
+                f"with cost-effective alternatives (NSG-only egress, jump box VM) "
+                f"while maintaining the security posture."
+            )
+        elif category == "incomplete_specification":
+            fix_msg = (
+                "The architecture specification was incomplete. Please provide the full, "
+                "complete architecture with all sections properly finished — especially "
+                "the Identity & Access Control and networking sections."
+            )
+        elif category == "operational_gap":
+            fix_msg = f"Add the missing operational component to the architecture: {message}"
+        elif category == "wrong_service_behaviour":
+            fix_msg = f"Fix the following service configuration issue: {message}"
+        elif category == "constraint_violation":
+            fix_msg = f"Redesign to fix this constraint violation: {message}"
+        else:
+            fix_msg = None
+
+        with st.container():
+            c_icon, c_body = st.columns([0.07, 0.93])
+            with c_icon:
+                st.markdown(f"## {icon}")
+            with c_body:
+                st.markdown(f"**{label}**")
+                st.markdown(message)
+                if fix_msg:
+                    if st.button("💡 Fix this", key=f"fix_{idx}", use_container_width=False):
+                        st.session_state.auto_fix_triggered = True
+                        st.session_state.auto_fix_message   = fix_msg
+                        st.rerun()
+                else:
+                    st.caption("📋 Note")
+
+    for idx, issue in enumerate(critical):
+        _card(issue, idx)
+    for idx, issue in enumerate(medium, start=len(critical)):
+        _card(issue, idx)
+
+    if low:
+        n_low = len(low)
+        with st.expander(
+            f"ℹ️ {n_low} minor note{'s' if n_low != 1 else ''} — click to expand"
+        ):
+            for idx, issue in enumerate(low, start=len(critical) + len(medium)):
+                _card(issue, idx)
 
 
 # ── Approve / eval helpers ─────────────────────────────────────────────────
@@ -1049,7 +1150,7 @@ if submit:
 
     with st.spinner("⚙️ Generating architecture…"):
         response = call_llm(st.session_state.llm_history, SYSTEM_ARCH,
-                            **_llm(temperature=0.2))
+                            **_llm(max_tokens=4096, temperature=0.2))
 
     st.session_state.llm_history.append({"role": "assistant", "content": response})
     st.session_state.chat_display           = [{"role": "assistant", "content": response}]
@@ -1095,6 +1196,12 @@ if st.session_state.architecture_generated:
 
     refinement = st.chat_input("Refine the architecture — describe any changes needed")
 
+    # Auto-fix button from issues panel injects a refinement message
+    if not refinement and st.session_state.get("auto_fix_triggered"):
+        refinement = st.session_state.auto_fix_message
+        st.session_state.auto_fix_triggered = False
+        st.session_state.auto_fix_message   = ""
+
     if refinement:
         with st.spinner("🔍 Consulting Brain…"):
             context_block, hits, learn_hits = get_brain_context(refinement, bm25)
@@ -1111,7 +1218,7 @@ if st.session_state.architecture_generated:
         history_clean = strip_bicep_from_history(st.session_state.llm_history)
 
         with st.spinner("⚙️ Refining architecture…"):
-            response = call_llm(history_clean, SYSTEM_ARCH, **_llm(temperature=0.2))
+            response = call_llm(history_clean, SYSTEM_ARCH, **_llm(max_tokens=4096, temperature=0.2))
 
         st.session_state.llm_history.append({"role": "assistant", "content": response})
         st.session_state.chat_display.append({"role": "assistant", "content": response})
@@ -1124,7 +1231,10 @@ if st.session_state.architecture_generated:
 
     st.subheader("📊 Architecture Quality")
     _scores = st.session_state.get("auto_scores") or {}
-    _flags  = [f for f in _scores.get("flags", []) if f and f != "auto-score unavailable"]
+    _flags  = [
+        f for f in _scores.get("flags", [])
+        if f and (isinstance(f, dict) or f != "auto-score unavailable")
+    ]
 
     if _scores and _scores.get("overall") is not None:
         _overall = _scores.get("overall", 0.5)
@@ -1140,10 +1250,7 @@ if st.session_state.architecture_generated:
         _dc1.caption(f"Constraints {_dim_icon(_ca)}")
         _dc2.caption(f"Security {_dim_icon(_sp)}")
         _dc3.caption(f"Completeness {_dim_icon(_co)}")
-        if _flags:
-            with st.expander("⚠️ Issues found"):
-                for _fl in _flags:
-                    st.markdown(f"- {_fl}")
+        render_issues(_flags, fv)
     else:
         st.caption("Auto-score unavailable — scorer requires a running LLM.")
 
