@@ -1159,6 +1159,11 @@ if submit:
     try:
         from brain.eval.auto_scorer import score_architecture
         with st.spinner("📊 Scoring architecture…"):
+            _region_chunks = [
+                {"text": h.chunk.content, "title": h.chunk.title or ""}
+                for h in hits
+                if "region-availability" in (h.chunk.source_repo or "")
+            ]
             st.session_state.auto_scores = score_architecture(
                 architecture_summary=response,
                 form_values=fv,
@@ -1167,6 +1172,7 @@ if submit:
                 model=selected_model,
                 provider=provider,
                 api_key=api_key,
+                context_chunks=_region_chunks or None,
             )
     except Exception:
         st.session_state.auto_scores = None

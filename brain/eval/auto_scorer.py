@@ -23,6 +23,7 @@ def _build_prompt(
     architecture_summary: str,
     form_values: dict,
     retrieved_chunks: list,
+    context_chunks: list[dict] | None = None,
 ) -> str:
     constraints = (
         f"Region: {form_values.get('region', 'N/A')}\n"
@@ -31,8 +32,19 @@ def _build_prompt(
         f"Hub VNet: {form_values.get('hub_vnet', 'N/A')}\n"
         f"Additional: {form_values.get('additional_constraints', 'None') or 'None'}\n"
     )
+
+    regional_section = ""
+    if context_chunks:
+        lines = ["## Verified Regional Knowledge (use this as ground truth):\n"]
+        for chunk in context_chunks[:5]:
+            title = chunk.get("title", "").strip()
+            text  = chunk.get("text", "").strip()[:600]
+            lines.append(f"**{title}**\n{text}\n" if title else f"{text}\n")
+        regional_section = "\n".join(lines) + "\n\n"
+
     return (
         "Evaluate the following Azure architecture against the hard constraints.\n\n"
+        f"{regional_section}"
         f"## Constraints\n{constraints}\n"
         f"## Architecture\n{architecture_summary[:3000]}\n\n"
         "Score each dimension 0.0–1.0:\n"
@@ -44,6 +56,10 @@ def _build_prompt(
         "4. overall — weighted: constraint_adherence×0.4 + security_posture×0.3 "
         "+ completeness×0.3\n\n"
         "IMPORTANT — service availability flags:\n"
+        "Azure OpenAI IS available in Qatar Central (qatarcentral) — this is confirmed. "
+        "Do NOT flag Azure OpenAI availability in Qatar Central as uncertain or unconfirmed. "
+        "Qatar Central is a supported Microsoft Foundry project region with Azure OpenAI GA. "
+        "Only flag regional availability if you have confirmed evidence of unavailability.\n"
         "You must ONLY flag service availability concerns if you have high confidence "
         "based on well-established facts. Do NOT flag service availability for mainstream "
         "Azure networking services (Azure Firewall, VPN Gateway, Bastion, AKS, AI Search, "
@@ -187,11 +203,14 @@ def score_architecture(
     model: str = "mistral-small:latest",
     provider: str = "OpenRouter",
     api_key: str = "",
+    context_chunks: list[dict] | None = None,
 ) -> dict:
     """Score an architecture on four dimensions. Returns fallback dict on any error."""
     try:
-        prompt = _build_prompt(architecture_summary, form_values, retrieved_chunks)
-        raw    = _call_llm(prompt, engine_mode, model, provider, api_key)
+        prompt = _build_prompt(
+            architecture_summary, form_values, retrieved_chunks, context_chunks
+        )
+        raw = _call_llm(prompt, engine_mode, model, provider, api_key)
         return _parse(raw)
     except Exception:
         return dict(_FALLBACK)
