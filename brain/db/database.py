@@ -96,6 +96,10 @@ def init_db() -> None:
             quarantined     INTEGER DEFAULT 0
         );
         """)
+        # Migration: admin flag (grant with scripts/set_admin.py)
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(users)")}
+        if "is_admin" not in cols:
+            con.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
 
 
 # ── Users ──────────────────────────────────────────────────────────────────
@@ -159,6 +163,24 @@ def reset_password(username: str, new_password: str) -> bool:
         )
         con.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],))
     return True
+
+
+def is_admin(user_id: int | None) -> bool:
+    """Checked against the database on every render — never trusted from session state."""
+    if user_id is None:
+        return False
+    with _conn() as con:
+        row = con.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+    return bool(row and row["is_admin"])
+
+
+def set_admin(username: str, admin: bool = True) -> bool:
+    """Grant or revoke admin. False if no such user."""
+    with _conn() as con:
+        cur = con.execute(
+            "UPDATE users SET is_admin = ? WHERE username = ?", (1 if admin else 0, username)
+        )
+        return cur.rowcount > 0
 
 
 # ── Sessions ───────────────────────────────────────────────────────────────

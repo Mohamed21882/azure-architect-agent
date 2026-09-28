@@ -42,6 +42,7 @@ from brain.ingest.local_reader import read_all_sources, walk_source
 from brain.models import IngestSource, RawDocument
 from brain.search.bm25_index import BM25Index
 from brain.store.vector_store import (
+    delete_by_file_paths,
     ensure_collection,
     get_client,
     mark_superseded,
@@ -269,7 +270,15 @@ def run_pipeline(config: BrainConfig = CONFIG, reset: bool = False) -> None:
             "chunk_ids": chunk_ids,
             "ingested_at": now_str,
         }
-    _save_manifest({"last_run": now_str, "files": manifest_files}, config)
+    repo_commits: dict[str, str] = {}
+    project_top = os.path.realpath(config.wiki_root)
+    for repo_name, root_dir in config.source_dirs.items():
+        top = _git_toplevel(root_dir) if os.path.isdir(root_dir) else ""
+        if top and top != project_top:
+            repo_commits[repo_name] = _git(["rev-parse", "HEAD"], root_dir).stdout.strip()
+    _save_manifest(
+        {"last_run": now_str, "files": manifest_files, "repo_commits": repo_commits}, config
+    )
     print(f"  Manifest saved: {len(manifest_files)} files → data/ingest_manifest.json\n")
 
     # ── Phase 5: Summary ──────────────────────────────────────────────────
@@ -277,20 +286,69 @@ def run_pipeline(config: BrainConfig = CONFIG, reset: bool = False) -> None:
     print("Pipeline complete.\n")
 
 
-def run_incremental(config: BrainConfig = CONFIG) -> None:
-    """Incremental ingest: git pull each source repo, re-index only changed .md files,
-    then run a confidence decay pass over all Qdrant chunks."""
+def _git(args: list[str], cwd: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+
+
+def _git_toplevel(path: str) -> str:
+    try:
+        r = _git(["rev-parse", "--show-toplevel"], path, timeout=15)
+        return os.path.realpath(r.stdout.strip()) if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _phase(name: str) -> None:
+    # Marker parsed by brain.kb.updater for the admin status panel
+    print(f"::phase:: {name}", flush=True)
+
+
+def _changed_md(root_dir: str, old: str, new: str) -> tuple[list[str], list[str], list[str]]:
+    """(added, modified, deleted) absolute .md paths under root_dir between two commits.
+    --relative scopes the diff to root_dir (e.g. azure-foundry/articles/foundry) and makes
+    paths relative to it; renames count as delete old + add new."""
+    r = _git(["diff", "--name-status", "--relative", "-M", old, new], root_dir, timeout=120)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip()[:200] or "git diff failed")
+    added: list[str] = []
+    modified: list[str] = []
+    deleted: list[str] = []
+    for line in r.stdout.splitlines():
+        parts = line.split("\t")
+        status = parts[0][:1]
+        paths = [os.path.join(root_dir, p) for p in parts[1:]]
+        if status == "R" and len(paths) == 2:
+            if paths[0].endswith(".md"):
+                deleted.append(paths[0])
+            if paths[1].endswith(".md"):
+                added.append(paths[1])
+        elif paths and paths[-1].endswith(".md"):
+            {"A": added, "C": added, "D": deleted}.get(status, modified).append(paths[-1])
+    return added, modified, deleted
+
+
+def run_incremental(config: BrainConfig = CONFIG, summary_path: str = "") -> dict:
+    """Incremental ingest: git pull each Microsoft source repo, re-index added/changed .md
+    files, remove chunks of deleted/renamed files, then run a confidence decay pass.
+
+    Old chunks are removed by file_path (Qdrant filter + BM25), so supersession works even
+    without an ingest manifest. Curated sources inside the TE-1 repo are never pulled.
+    """
     print("\n╔══════════════════════════════════════╗")
     print("║   TE-1 Brain Incremental Ingest      ║")
     print("╚══════════════════════════════════════╝\n")
+    t_start = time.perf_counter()
+    summary: dict = {"started_at": datetime.datetime.utcnow().isoformat(), "repos": {}}
 
     # ── Phase 0: Load manifest ────────────────────────────────────────────
     manifest = _load_manifest(config)
     files_manifest: dict[str, dict] = manifest.get("files", {})
+    repo_commits: dict[str, str] = manifest.get("repo_commits", {})
     print(f"Manifest loaded: {len(files_manifest)} tracked files "
-          f"(last run: {manifest.get('last_run', 'never')})\n")
+          f"(last run: {manifest.get('last_run') or 'never'})\n")
 
     # ── Phase 1: Connect to Qdrant + load BM25 ───────────────────────────
+    _phase("connect")
     print("Connecting to Qdrant...")
     try:
         qdrant = get_client(config)
@@ -307,78 +365,96 @@ def run_incremental(config: BrainConfig = CONFIG) -> None:
             print(f"  BM25 index loaded ({len(bm25)} chunks).\n")
         except Exception:
             print("  BM25 index not found or corrupt — starting fresh.\n")
+    bm25_counts: dict[str, int] = defaultdict(int)
+    for fp in bm25.file_paths:
+        bm25_counts[fp] += 1
 
-    # ── Phase 2: git pull + diff each source repo ─────────────────────────
-    changed_files: list[str] = []
+    # ── Phase 2: git pull + diff each Microsoft source repo ──────────────
+    _phase("git pull")
+    project_top = os.path.realpath(config.wiki_root)
+    work: list[tuple[str, str, str]] = []  # (repo_name, abs_path, kind: added|modified|deleted)
     for repo_name, root_dir in config.source_dirs.items():
         if not os.path.isdir(root_dir):
             continue
+        top = _git_toplevel(root_dir)
+        if not top:
+            print(f"  [{repo_name}] not a git repo — skipped")
+            continue
+        if top == project_top:
+            print(f"  [{repo_name}] curated source in the TE-1 repo — not pulled (review manually)")
+            continue
 
+        rs = {"pull": "", "old_commit": "", "new_commit": "", "added": 0, "updated": 0,
+              "superseded": 0, "chunks_added": 0, "chunks_removed": 0, "embed_failed": 0}
+        summary["repos"][repo_name] = rs
+        head = _git(["rev-parse", "HEAD"], root_dir).stdout.strip()
+        # Diff from the commit last ingested; first run assumes the index matches HEAD.
+        # Persist that baseline BEFORE pulling, so a run killed after the pull still
+        # re-diffs from the right commit next time instead of silently skipping changes.
+        if not repo_commits.get(repo_name) and head:
+            repo_commits[repo_name] = head
+            manifest["repo_commits"] = repo_commits
+            _save_manifest(manifest, config)
+        base = repo_commits.get(repo_name) or head
+        rs["old_commit"] = base
         try:
-            result = subprocess.run(
-                ["git", "pull"],
-                cwd=root_dir,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            summary = result.stdout.strip().splitlines()[0] if result.stdout.strip() else "ok"
-            print(f"  [{repo_name}] git pull: {summary}")
-        except Exception as exc:
-            print(f"  [{repo_name}] git pull skipped: {exc}")
-
+            r = _git(["pull", "--ff-only"], root_dir, timeout=config.git_pull_timeout)
+            out = (r.stdout.strip() or r.stderr.strip()).splitlines()
+            rs["pull"] = ("ok: " if r.returncode == 0 else "FAILED: ") + (out[0] if out else "")
+        except subprocess.TimeoutExpired:
+            rs["pull"] = f"FAILED: timed out after {config.git_pull_timeout}s"
+        print(f"  [{repo_name}] git pull {rs['pull']}")
+        new = _git(["rev-parse", "HEAD"], root_dir).stdout.strip()
+        rs["new_commit"] = new
+        if base == new:
+            continue
         try:
-            result = subprocess.run(
-                ["git", "diff", "--name-only", "HEAD@{1}", "HEAD"],
-                cwd=root_dir,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if line.endswith(".md"):
-                    abs_path = os.path.join(root_dir, line)
-                    if os.path.isfile(abs_path):
-                        changed_files.append(abs_path)
+            added, modified, deleted = _changed_md(root_dir, base, new)
         except Exception as exc:
-            print(f"  [{repo_name}] git diff skipped: {exc}")
+            print(f"  [{repo_name}] git diff failed: {exc}")
+            rs["pull"] += f" | diff failed: {exc}"
+            rs["new_commit"] = base  # don't advance — retry this range next run
+            continue
+        print(f"  [{repo_name}] {base[:10]}..{new[:10]}: "
+              f"{len(added)} added, {len(modified)} modified, {len(deleted)} deleted .md")
+        work += [(repo_name, p, "added") for p in added]
+        work += [(repo_name, p, "modified") for p in modified]
+        work += [(repo_name, p, "deleted") for p in deleted]
 
-    print(f"\nChanged .md files detected: {len(changed_files)}")
-
-    # ── Phase 3: Re-index changed files ───────────────────────────────────
-    updated_count = 0
-    for file_path in changed_files:
+    # ── Phase 3: Supersede + re-index ─────────────────────────────────────
+    _phase("re-index")
+    total = len(work)
+    print(f"\nChanged .md files to process: {total}")
+    touched_bm25 = False
+    import re as _re
+    for n, (repo_name, file_path, kind) in enumerate(work, 1):
+        rs = summary["repos"][repo_name]
         rel_path = os.path.relpath(file_path, config.wiki_root)
+        print(f"[{n}/{total}] {kind:8} {rel_path}", flush=True)
+
+        # Supersede: remove every existing chunk for this path (Qdrant + BM25)
+        old_chunks = bm25_counts.pop(file_path, 0)
+        try:
+            delete_by_file_paths(qdrant, [file_path], config)
+            mark_superseded(qdrant, files_manifest.get(rel_path, {}).get("chunk_ids", []), config)
+        except Exception as exc:
+            print(f"    [WARN] Qdrant delete failed for {rel_path}: {exc}")
+        if bm25.remove_files({file_path}):
+            touched_bm25 = True
+        rs["chunks_removed"] += old_chunks
+        files_manifest.pop(rel_path, None)
+
+        if kind == "deleted" or not os.path.isfile(file_path):
+            rs["superseded"] += 1
+            continue
 
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
                 raw_content = fh.read()
-        except OSError:
+        except OSError as exc:
+            print(f"    [WARN] read failed: {exc}")
             continue
 
-        new_hash = hashlib.sha256(raw_content.encode()).hexdigest()
-        stored = files_manifest.get(rel_path, {})
-
-        if stored.get("hash") == new_hash:
-            continue  # content identical — skip
-
-        print(f"  Re-indexing: {rel_path}")
-
-        # Delete old chunks from Qdrant
-        old_chunk_ids = stored.get("chunk_ids", [])
-        if old_chunk_ids:
-            mark_superseded(qdrant, old_chunk_ids, config)
-
-        # Determine source repo from path
-        source_repo = "unknown"
-        for rn, rd in config.source_dirs.items():
-            if file_path.startswith(rd):
-                source_repo = rn
-                break
-
-        # Build RawDocument — strip YAML frontmatter inline
-        import re as _re
         clean = _re.sub(r"^---\s*\n.*?\n---\s*\n", "", raw_content, count=1, flags=_re.DOTALL).lstrip()
         title_match = _re.search(r"^#\s+(.+)", clean, _re.MULTILINE)
         title = (title_match.group(1).strip() if title_match
@@ -388,17 +464,17 @@ def run_incremental(config: BrainConfig = CONFIG) -> None:
             doc_id=hashlib.sha1(file_path.encode()).hexdigest(),
             content=clean,
             source=IngestSource.MICROSOFT_LEARN,
-            source_repo=source_repo,
+            source_repo=repo_name,
             file_path=file_path,
             title=title,
         )
-
         chunks = chunk_document(
             doc,
             chunk_size=config.chunk_size_words,
             overlap=config.chunk_overlap_words,
             min_words=config.min_chunk_words,
         )
+        rs["added" if old_chunks == 0 else "updated"] += 1
         if not chunks:
             continue
 
@@ -406,25 +482,33 @@ def run_incremental(config: BrainConfig = CONFIG) -> None:
             embed_chunks(chunks, config)
         except Exception as exc:
             print(f"    [WARN] Embed failed for {rel_path}: {exc}")
-            continue
-
         embedded = [c for c in chunks if c.embedding is not None]
+        rs["embed_failed"] += len(chunks) - len(embedded)
         if embedded:
-            upsert_chunks(qdrant, embedded, config)
+            try:
+                upsert_chunks(qdrant, embedded, config)
+            except Exception as exc:
+                print(f"    [WARN] Qdrant upsert failed for {rel_path}: {exc}")
 
-        bm25.add(chunks)
-
+        bm25.add(chunks)  # BM25 keeps un-embedded chunks too, as in the full pipeline
+        touched_bm25 = True
+        rs["chunks_added"] += len(chunks)
         files_manifest[rel_path] = {
-            "hash": new_hash,
+            "hash": hashlib.sha256(raw_content.encode()).hexdigest(),
             "chunk_ids": [c.chunk_id for c in chunks],
             "ingested_at": datetime.datetime.utcnow().isoformat(),
         }
-        updated_count += 1
 
-    print(f"  Re-indexed {updated_count} file(s).\n")
+    for repo_name, rs in summary["repos"].items():
+        if rs["new_commit"]:
+            repo_commits[repo_name] = rs["new_commit"]
+        print(f"  [{repo_name}] added {rs['added']}, updated {rs['updated']}, "
+              f"superseded {rs['superseded']} file(s); chunks +{rs['chunks_added']} "
+              f"-{rs['chunks_removed']}")
 
     # ── Phase 4: Confidence decay pass ────────────────────────────────────
-    print("Running confidence decay pass (batch size 500)...")
+    _phase("confidence decay")
+    print("\nRunning confidence decay pass (batch size 500)...")
     decay_updates = 0
     try:
         offset = None
@@ -467,9 +551,11 @@ def run_incremental(config: BrainConfig = CONFIG) -> None:
         print(f"  [WARN] Decay pass error: {exc}")
 
     print(f"  Confidence decay updates applied: {decay_updates}\n")
+    summary["decay_updates"] = decay_updates
 
     # ── Phase 5: Persist BM25 + manifest ──────────────────────────────────
-    if updated_count > 0:
+    _phase("save index")
+    if touched_bm25:
         print(f"Rebuilding BM25 index ({len(bm25)} chunks)...")
         bm25.build()
         bm25.save(config.bm25_index_path)
@@ -478,12 +564,20 @@ def run_incremental(config: BrainConfig = CONFIG) -> None:
     now_str = datetime.datetime.utcnow().isoformat()
     manifest["last_run"] = now_str
     manifest["files"] = files_manifest
+    manifest["repo_commits"] = repo_commits
     _save_manifest(manifest, config)
     print(f"  Manifest updated → data/ingest_manifest.json\n")
+
+    summary["finished_at"] = now_str
+    summary["duration_s"] = round(time.perf_counter() - t_start, 1)
+    if summary_path:
+        with open(summary_path, "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, indent=2)
     print("Incremental ingest complete.\n")
+    return summary
 
 
-def _parse_args() -> tuple[BrainConfig, bool, bool]:
+def _parse_args() -> tuple[BrainConfig, bool, bool, str]:
     parser = argparse.ArgumentParser(description="TE-1 Brain Ingest Pipeline")
     parser.add_argument("--collection", default=CONFIG.qdrant_collection,
                         help="Qdrant collection name")
@@ -499,6 +593,8 @@ def _parse_args() -> tuple[BrainConfig, bool, bool]:
                         help="Delete and recreate the Qdrant collection before ingesting")
     parser.add_argument("--incremental", action="store_true",
                         help="Only re-index files changed since last run (git diff)")
+    parser.add_argument("--summary-json", default="",
+                        help="With --incremental: write a JSON run summary to this path")
     args = parser.parse_args()
 
     cfg = BrainConfig(
@@ -508,12 +604,12 @@ def _parse_args() -> tuple[BrainConfig, bool, bool]:
         embed_batch_size=args.batch_size,
         chunk_size_words=args.chunk_size,
     )
-    return cfg, args.reset, args.incremental
+    return cfg, args.reset, args.incremental, args.summary_json
 
 
 if __name__ == "__main__":
-    cfg, reset, incremental = _parse_args()
+    cfg, reset, incremental, summary_json = _parse_args()
     if incremental:
-        run_incremental(cfg)
+        run_incremental(cfg, summary_json)
     else:
         run_pipeline(cfg, reset)

@@ -5,6 +5,11 @@ import uuid
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import (
     Distance,
+    FieldCondition,
+    Filter,
+    FilterSelector,
+    MatchAny,
+    MatchValue,
     OptimizersConfigDiff,
     PointStruct,
     VectorParams,
@@ -133,3 +138,40 @@ def mark_superseded(
         )
     except Exception:
         pass
+
+
+def delete_by_file_paths(
+    client: QdrantClient,
+    file_paths: list[str],
+    config: BrainConfig,
+) -> None:
+    """Delete every chunk whose payload file_path is in file_paths.
+
+    Works without an ingest manifest: chunks are found by their stored absolute path,
+    so a changed file's old chunks are always removed before it is re-indexed.
+    """
+    for i in range(0, len(file_paths), 100):
+        batch = file_paths[i : i + 100]
+        client.delete(
+            collection_name=config.qdrant_collection,
+            points_selector=FilterSelector(
+                filter=Filter(must=[FieldCondition(key="file_path", match=MatchAny(any=batch))])
+            ),
+            wait=True,
+        )
+
+
+def count_by_source(
+    client: QdrantClient,
+    source_repos: list[str],
+    config: BrainConfig,
+) -> dict[str, int]:
+    """Exact vector (embedded chunk) count per source_repo."""
+    out: dict[str, int] = {}
+    for repo in source_repos:
+        out[repo] = client.count(
+            collection_name=config.qdrant_collection,
+            count_filter=Filter(must=[FieldCondition(key="source_repo", match=MatchValue(value=repo))]),
+            exact=True,
+        ).count
+    return out

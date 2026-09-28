@@ -40,6 +40,9 @@ Project root: ~/Azure-Architect-Wiki
 ├── brain/
 │   ├── models.py              # Chunk, RawDocument, SearchResult, WikiPage, IngestRun
 │   ├── config.py              # Settings, half-life constants, use_learn_mcp, learn_mcp_url, use_azure_mcp, azure_mcp_image, azure_mcp_timeout
+│   ├── kb/
+│   │   ├── status.py          # KB state, git-fetch update check, flock test, spawn updater
+│   │   └── updater.py         # Background runner: pull + incremental ingest, status/history JSON
 │   ├── azure/
 │   │   └── tenant_context.py  # Read-only tenant context: Azure MCP (subs, RGs) + ARM GET (VNets/subnets)
 │   ├── ingest/
@@ -61,8 +64,9 @@ Project root: ~/Azure-Architect-Wiki
 │       └── database.py        # SQLite: users, architectures, sessions, evaluations, chunk_feedback_log
 ├── ui/
 │   ├── app.py                 # Full Streamlit portal (1300+ lines)
+│   ├── kb_panel.py            # 📚 Knowledge Base admin panel (rendered on evals dashboard)
 │   └── pages/
-│       └── evals_dashboard.py # Evaluation metrics dashboard
+│       └── evals_dashboard.py # Evaluation metrics dashboard (+ KB panel for admins)
 ├── wiki/
 │   ├── semantic/              # Crystallised session wiki pages (growing)
 │   ├── procedural/            # Deployment runbooks (empty, v0.2)
@@ -72,11 +76,15 @@ Project root: ~/Azure-Architect-Wiki
 │   ├── azure-ai/              # 4,354 MS docs (gitignored)
 │   ├── azure-foundry/         # 791 MS docs (gitignored)
 │   ├── cli/                   # 137 MS docs (gitignored)
-│   ├── region-availability/   # VERSIONED: Qatar Central + UAE North curated data
-│   └── microsoft-fabric/      # VERSIONED: WAF for Microsoft Fabric (6 pages)
+│   └── region-availability/   # VERSIONED: Qatar Central + UAE North curated data (3 files)
 ├── data/
 │   ├── qdrant/                # Qdrant persistent storage (gitignored)
-│   └── ingest_manifest.json   # Tracks ingested files for incremental re-ingest
+│   ├── ingest_manifest.json   # Written by ingest runs: files, last_run, repo_commits (did NOT exist before Sep 28 2026)
+│   └── kb_update/             # status.json, history.json (last 10), check.json, update.lock, last_run.log
+├── scripts/
+│   ├── reset_password.py      # CLI password reset (getpass), revokes sessions
+│   └── set_admin.py           # Grant/revoke is_admin
+├── tests/                     # stdlib unittest: PYTHONPATH=. venv/bin/python -m unittest discover -s tests -v
 ├── .claude/
 │   └── commands/
 │       └── te1-context.md     # This file
@@ -91,7 +99,9 @@ Project root: ~/Azure-Architect-Wiki
 
 - 63,921 chunks in Qdrant (768-dim cosine)
 - 63,921 chunks in BM25 index (brain/store/bm25.pkl, 117MB)
-- Sources: architecture-center (534 docs), azure-ai (4,354), azure-foundry (791), cli (137), region-availability (3 curated files), microsoft-fabric (6 curated files)
+- Indexed (Sep 28 2026, BM25): architecture-center 533 docs / 8,781 chunks, azure-ai 4,192 / 42,374, azure-foundry 694 / 9,607, cli 134 / 3,118, region-availability 3 / 32. Qdrant holds 63,313 vectors (599 chunks never embedded → keyword-only)
+- microsoft-fabric: NOT in raw/ and NOT in the index — the earlier brief was wrong; the KB panel flags it as missing
+- azure-ai and azure-foundry are both clones of MicrosoftDocs/azure-ai-docs (azure-foundry ingests only articles/foundry; azure-foundry's remote is SSH)
 - Qdrant collection name: azure_wiki
 
 ## What Is Fully Shipped (Alpha v0.1)
@@ -118,6 +128,7 @@ Project root: ~/Azure-Architect-Wiki
 20. Auto-scorer grounded in regional availability chunks — score_architecture() accepts context_chunks: list[dict] | None = None; app.py filters last_hits for source_repo containing "region-availability" and passes as {"text":..., "title":...} dicts; prepended to scorer prompt under "## Verified Regional Knowledge (use this as ground truth)"
 21. Azure OpenAI Qatar Central false flag fixed — explicit hard instruction added to scorer prompt: "Azure OpenAI IS available in Qatar Central (qatarcentral) — this is confirmed. Do NOT flag Azure OpenAI availability in Qatar Central as uncertain or unconfirmed. Qatar Central is a supported Microsoft Foundry project region with Azure OpenAI GA."
 22. start.sh / stop.sh — confirmed working one-command launch, auto-detects LAN IP
+24. Knowledge base update (admin only, Sep 28 2026) — users.is_admin (migration in init_db; grant via scripts/set_admin.py; mohelal is admin; is_admin() re-checked from DB each render). "📚 Knowledge Base" panel on the evals dashboard: totals, per-source docs/chunks/vectors, last ingest, local commit per MS repo, "Check for updates" (git fetch only, parallel; commits behind + .md changed, scoped with --relative), "Update now" → spawns `python -m brain.kb.updater` detached (start_new_session) which holds an fcntl flock on data/kb_update/update.lock (second run exits 3; kernel frees lock on crash; panel shows 'interrupted' if status says running but lock is free), runs `brain.ingest.pipeline --incremental --summary-json`, streams ::phase:: markers and [n/N] progress to status.json (panel auto-refreshes via st.fragment(run_every=5)), then records before/after snapshot + added/updated/superseded + duration in history.json (last 10). Curated sources: last verified = oldest per-file `last_verified: YYYY-MM-DD` frontmatter or git commit date; warning > 30 days. App shows a slowdown banner while an update runs; load_bm25() is keyed on bm25.pkl mtime so updates are picked up without restart
 23. Azure MCP Server Phase 1 — read-only tenant context (Sep 28 2026). brain/azure/tenant_context.py: get_tenant_context() -> TenantContext (subscription name/id, resource_groups [{name,location}], vnets [VNet(name, resource_group, location, address_prefixes, subnets[Subnet(name, prefixes)])], fetched_at, error). Subscriptions + RGs via Azure MCP Server: `docker run --rm -i -e AZURE_* <image> --read-only --tool subscription_list --tool group_list` over mcp stdio_client. VNets/subnets via ONE ARM REST GET (Microsoft.Network/virtualNetworks, api 2024-05-01, client-credentials token) because the azure-mcp image has NO network namespace. 30s overall timeout (config.azure_mcp_timeout), 10-min cache on success / 60s on error, threading.Lock, never raises. Missing AZURE_ vars -> error "Azure credentials not configured" instantly. Loads .env itself via python-dotenv (override=False). format_for_prompt(ctx) renders compact summary + "Address ranges already in use (do NOT overlap)". UI: "Ground in my Azure tenant" checkbox (default off, stored as fv["ground_tenant"]); third parallel task in get_brain_context(..., ground_tenant=) ThreadPoolExecutor(max_workers=3); result in st.session_state.last_tenant_ctx (None = not requested); prompt section "## Your Azure Tenant (live, read-only)" with reuse-RG / no-overlap / naming instruction and names-are-data warning; sidebar "🔷 Azure Tenant Context"; score_architecture(tenant_context=str) flags address overlaps as critical constraint_violation. Live fetch ≈9s (container start), cached ≈0ms
 
 ## What Is NOT Built Yet (v0.2 Targets)
@@ -144,6 +155,7 @@ Project root: ~/Azure-Architect-Wiki
 - temperature=0.2 for architecture generation and refinement; temperature=1.0 (default) for Bicep generation
 - max_tokens=4096 for architecture generation/refinement; max_tokens=-1 (unlimited) for Bicep
 - _do_approve() is the single canonical approve path — called from both Approve button and "Skip and Approve →"
+- run_incremental() (rewritten Sep 28 2026): skips sources inside the TE-1 repo (curated), records each repo's baseline commit in manifest.repo_commits BEFORE pulling, `git pull --ff-only` (CONFIG.git_pull_timeout 1800s), diffs `--name-status --relative -M base..new` (A/M/D/R), removes old chunks by file_path from Qdrant (delete_by_file_paths) and BM25 (remove_files) — works with no manifest — then re-chunks/embeds. BM25Index.save() is atomic (tmp + os.replace)
 - Learn MCP falls back silently on timeout/error — never blocks generation; asyncio.run() safe in ThreadPoolExecutor threads
 - Auto-scorer must NOT flag mainstream Azure services (Firewall, VPN Gateway, Bastion, AKS, AI Search, Storage, Key Vault) as unavailable in any GA region without confirmed evidence
 - Azure OpenAI IS confirmed available in Qatar Central — do not re-add a flag for it
@@ -178,7 +190,7 @@ Project root: ~/Azure-Architect-Wiki
 
 ## Next Session Priorities
 
-1. Knowledge base refresh — pull raw/ repos, run pipeline --incremental; region-availability data is months past its 30d half-life
+1. Knowledge base refresh — use the admin panel (Check for updates → Update now); first real run not yet done. Review raw/region-availability by hand (months stale) and decide whether to create the Microsoft Fabric source
 2. Deploy engine design — builds on Phase 1 tenant context (Azure MCP + SP pattern); design in chat first, needs a separate write-scoped SP + programmatic HITL gate
 3. Azure MCP Phase 2 candidates — group_resource_list for existing resources, quota_usage_check / quota_region_availability_list for capacity grounding
 4. Commercial pages (tensoredge.net, Paddle) — parked until the user revisits

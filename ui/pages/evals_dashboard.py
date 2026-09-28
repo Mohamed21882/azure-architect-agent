@@ -8,6 +8,7 @@ from brain.db.database import (
     init_db,
     get_eval_dashboard_stats,
     get_recent_evaluations,
+    is_admin,
 )
 
 st.set_page_config(page_title="TE-1 Evaluation Dashboard", layout="wide")
@@ -22,6 +23,13 @@ init_db()
 
 st.title("📊 TE-1 Evaluation Dashboard")
 st.markdown("---")
+
+# ── Admin: knowledge base updates ──────────────────────────────────────────
+
+if is_admin(st.session_state.get("user_id")):
+    from ui.kb_panel import render_kb_panel
+    render_kb_panel()
+    st.markdown("---")
 
 # ── Row 1: metric cards ────────────────────────────────────────────────────
 

@@ -84,13 +84,31 @@ class BM25Index:
             )
         return results
 
+    def remove_files(self, file_paths: set[str]) -> int:
+        """Drop every chunk belonging to file_paths. Returns the number removed."""
+        if not file_paths:
+            return 0
+        keep = [i for i, fp in enumerate(self.file_paths) if fp not in file_paths]
+        removed = len(self.chunk_ids) - len(keep)
+        if removed:
+            self.chunk_ids    = [self.chunk_ids[i] for i in keep]
+            self.file_paths   = [self.file_paths[i] for i in keep]
+            self.source_repos = [self.source_repos[i] for i in keep]
+            self.titles       = [self.titles[i] for i in keep]
+            self.contents     = [self.contents[i] for i in keep]
+            self._bm25 = None
+        return removed
+
     def __len__(self) -> int:
         return len(self.chunk_ids)
 
     def save(self, path: str) -> None:
+        # Atomic replace: the running app may load this file at any moment
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as fh:
+        tmp = f"{path}.tmp-{os.getpid()}"
+        with open(tmp, "wb") as fh:
             pickle.dump(self, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
 
     @classmethod
     def load(cls, path: str) -> "BM25Index":

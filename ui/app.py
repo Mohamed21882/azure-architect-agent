@@ -31,7 +31,9 @@ from brain.db.database import (
     delete_architecture,
     save_evaluation,
     update_chunk_feedback_log,
+    is_admin,
 )
+from brain.kb.status import is_update_running
 
 st.set_page_config(page_title="TE-1: Azure Architect Portal", layout="wide")
 
@@ -116,12 +118,21 @@ SYSTEM_BICEP = (
 
 # ── Brain ──────────────────────────────────────────────────────────────────
 
-@st.cache_resource(show_spinner="Loading Brain index…")
-def load_bm25() -> BM25Index | None:
+@st.cache_resource(show_spinner="Loading Brain index…", max_entries=1)
+def _load_bm25_cached(mtime: float) -> BM25Index | None:
     try:
         return BM25Index.load(CONFIG.bm25_index_path)
     except Exception:
         return None
+
+
+def load_bm25() -> BM25Index | None:
+    """Keyed on the index file time so a knowledge base update is picked up without a restart."""
+    try:
+        mtime = os.path.getmtime(CONFIG.bm25_index_path)
+    except OSError:
+        mtime = 0.0
+    return _load_bm25_cached(mtime)
 
 
 def get_brain_context(
@@ -803,6 +814,11 @@ with st.sidebar:
     # ── Evals Dashboard link ──────────────────────────────────────────────
     st.divider()
     st.page_link("pages/evals_dashboard.py", label="📊 Evals Dashboard")
+    if st.session_state.mode == "authenticated" and is_admin(st.session_state.user_id):
+        st.page_link("pages/evals_dashboard.py", label="📚 Knowledge Base (admin)")
+    if is_update_running():
+        st.warning("📚 Knowledge base update in progress — generation will be slower "
+                   "until it finishes.")
 
     # ── My Architectures / Guest prompt ───────────────────────────────────
     st.divider()

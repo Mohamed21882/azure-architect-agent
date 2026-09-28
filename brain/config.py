@@ -32,6 +32,9 @@ class BrainConfig:
     # --- Retrieval ---
     brain_search_timeout: int = 180  # CPU Ollama may queue the query embedding behind a chat request
 
+    # --- Knowledge base updates ---
+    git_pull_timeout: int = 1800  # months of upstream history can take a while
+
     # --- Microsoft Learn MCP ---
     use_learn_mcp: bool = True
     learn_mcp_url: str = "https://learn.microsoft.com/api/mcp"
