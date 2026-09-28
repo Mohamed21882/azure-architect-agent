@@ -1,5 +1,3 @@
-USAGE: After /clear, paste this into Claude Code: read ~/.claude/skills/te1-context.md and use as session context
-
 ---
 name: te1-context
 description: Project brief for TensorEdge-1 (TE-1) — autonomous Azure Architect Agent. Load this to restore full build context before any TE-1 task.
