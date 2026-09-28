@@ -258,11 +258,15 @@ def _render_rebuild(running: bool) -> None:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     chk = report["checks"]
-    f = chk["foundry_chunks_under_azure_ai"]
+    ex = chk.get("excluded_under_azure_ai") or chk.get("foundry_chunks_under_azure_ai", {})
+    lg = chk.get("legacy_foundry_classic", {})
     (st.success if chk["passed"] else st.error)(
         f"Checks {'passed' if chk['passed'] else 'FAILED'} — chunks without vectors: "
         f"{sum(chk['missing_vectors'].values()) if chk['missing_vectors'] else 0}; "
-        f"Foundry chunks under azure-ai: BM25 {f['bm25']}, Qdrant {f['qdrant']}")
+        f"excluded Foundry/Foundry Local chunks under azure-ai: BM25 {ex.get('bm25')}, "
+        f"Qdrant {ex.get('qdrant')}; foundry-classic tagged legacy: {lg.get('tagged', '—')} "
+        f"(untagged {lg.get('untagged', '—')}); crystallised vectors: "
+        f"{chk.get('crystallised_vectors', '—')}")
 
     with st.expander("Sample searches — serving vs candidate"):
         for q, new_hits in report["samples"]["candidate"].items():

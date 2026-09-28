@@ -53,11 +53,12 @@ Project root: ~/Azure-Architect-Wiki
 │   ├── search/
 │   │   ├── bm25_index.py      # BM25Okapi, persisted to brain/store/bm25.pkl
 │   │   ├── hybrid_search.py   # RRF fusion, temporal reranking, reinforcement
-│   │   └── learn_mcp.py       # Microsoft Learn MCP Server live retrieval
+│   │   ├── learn_mcp.py       # Microsoft Learn MCP Server live retrieval
+│   │   └── context_format.py  # format_brain_section(): Brain hits → prompt, legacy Foundry under its own heading
 │   ├── store/
 │   │   └── vector_store.py    # Qdrant wrapper, upsert, set_payload, supersession
 │   ├── wiki/
-│   │   └── crystalliser.py    # Session → wiki/semantic/*.md + re-ingest
+│   │   └── crystalliser.py    # Approved session → wiki/semantic/*.md, region-checked, indexed as source "crystallised"
 │   ├── eval/
 │   │   └── auto_scorer.py     # Architecture quality scorer, structured flags, context_chunks grounding
 │   └── db/
@@ -68,7 +69,7 @@ Project root: ~/Azure-Architect-Wiki
 │   └── pages/
 │       └── evals_dashboard.py # Evaluation metrics dashboard (+ KB panel for admins)
 ├── wiki/
-│   ├── semantic/              # Crystallised session wiki pages (growing)
+│   ├── semantic/              # Source "crystallised" (approved sessions + foundry-agent page); in every rebuild
 │   ├── procedural/            # Deployment runbooks (empty, v0.2)
 │   └── entities/              # Client configurations (empty, v0.2)
 ├── raw/
@@ -102,7 +103,7 @@ Project root: ~/Azure-Architect-Wiki
 - 63,921 chunks in BM25 index (brain/store/bm25.pkl, 117MB)
 - Indexed (Sep 28 2026, BM25): architecture-center 533 docs / 8,781 chunks, azure-ai 4,192 / 42,374, azure-foundry 694 / 9,607, cli 134 / 3,118, region-availability 3 / 32. Qdrant holds 63,313 vectors (599 chunks never embedded → keyword-only)
 - microsoft-fabric: created Sep 28 2026 — 6 WAF pages from learn.microsoft.com/azure/well-architected/microsoft-fabric/ (overview, reliability, security, cost-optimization, operational-excellence, performance-efficiency) fetched via Learn MCP microsoft_docs_fetch; gitignored because the WAF source repo is private and no public license was found. Added to source_dirs; enters the index at the next full rebuild
-- Foundry de-dup: BrainConfig.source_excludes = {"azure-ai": ["articles/foundry"]} (walk + incremental); azure-foundry owns Foundry. azure-ai still scans foundry-classic (514 docs) and foundry-local (74). The serving azure_wiki still has the duplicates until the rebuild
+- Foundry de-dup: BrainConfig.source_excludes = {"azure-ai": ["articles/foundry", "articles/foundry-local"]} (walk + incremental). azure-foundry owns Foundry. azure-ai articles/foundry-classic (514 docs) is KEPT but tagged legacy: true (BrainConfig.legacy_dirs). The serving azure_wiki still has the old duplicates until the rebuild is switched in
 - Sep 28 2026: backfilled the 608 missing vectors into azure_wiki (brain.ingest.backfill_vectors); failures were whole transient batches — embedder now retries (2/5/15s) then falls back to per-chunk
 - azure-ai and azure-foundry are both clones of MicrosoftDocs/azure-ai-docs (azure-foundry ingests only articles/foundry; azure-foundry's remote is SSH)
 - Qdrant collection name: azure_wiki
@@ -131,6 +132,7 @@ Project root: ~/Azure-Architect-Wiki
 20. Auto-scorer grounded in regional availability chunks — score_architecture() accepts context_chunks: list[dict] | None = None; app.py filters last_hits for source_repo containing "region-availability" and passes as {"text":..., "title":...} dicts; prepended to scorer prompt under "## Verified Regional Knowledge (use this as ground truth)"
 21. Azure OpenAI / Qatar Central rule (CORRECTED Sep 28 2026 — the May rule claiming Azure OpenAI was GA in Qatar Central was WRONG): Azure OpenAI is NOT deployable in Qatar Central (`az cognitiveservices model list --location qatarcentral` returns no models; UAE North returns the full catalog). Scorer prompt: an Azure OpenAI deployment in Qatar Central = critical (wrong_region_availability); calling UAE North from a Qatar Central design is correct but must state that prompts and responses leave Qatar, else medium (incomplete_specification). Deterministic backstop auto_scorer.openai_region_verdict()/_apply_openai_region_rule() replaces LLM region flags with one consistent verdict and also runs when the scorer LLM fails. Tests: tests/test_auto_scorer_openai_region.py
 22. start.sh / stop.sh — confirmed working one-command launch, auto-detects LAN IP
+25. Crystallisation + legacy sources (Sep 28 2026) — root cause of 'no crystallised chunks': the May 11 --reset rebuild ingested raw/ only, so wiki/semantic pages were dropped; the silent except hid everything else. Now: wiki/semantic is source "crystallised" (in rebuilds); crystallise_session() requires session["approved"] is True, runs the scorer's Azure OpenAI region check (region_block_reason) BEFORE indexing — failing pages are written with `index: false` + index_blocked and never indexed (page_block_reason() also gates rebuild scans); indexing takes the KB lock (skips with warning if an update runs), upserts only embedded chunks, returns CrystalliseResult(path, indexed, warning) shown as st.warning. Sidebar badges: 🧠 Crystallised session, 🕰️ Legacy (hub-based Foundry); titles html-escaped. Prompt: legacy chunks under '## Legacy reference — hub-based Azure AI Foundry (existing deployments only)' with a never-for-new-designs note; crystallised hits labelled as previously approved designs. Rebuild checks: excluded folders absent, every foundry-classic vector tagged legacy, crystallised vector count. Deleted the May test page 2026-05-10-aks-private-cluster-with-waf-and-key-vault.md; downloads/ gitignored
 24. Knowledge base update (admin only, Sep 28 2026) — users.is_admin (migration in init_db; grant via scripts/set_admin.py; mohelal is admin; is_admin() re-checked from DB each render). "📚 Knowledge Base" panel on the evals dashboard: totals, per-source docs/chunks/vectors, last ingest, local commit per MS repo, "Check for updates" (git fetch only, parallel; commits behind + .md changed, scoped with --relative), "Update now" → spawns `python -m brain.kb.updater` detached (start_new_session) which holds an fcntl flock on data/kb_update/update.lock (second run exits 3; kernel frees lock on crash; panel shows 'interrupted' if status says running but lock is free), runs `brain.ingest.pipeline --incremental --summary-json`, streams ::phase:: markers and [n/N] progress to status.json (panel auto-refreshes via st.fragment(run_every=5)), then records before/after snapshot + added/updated/superseded + duration in history.json (last 10). Curated sources: last verified = oldest per-file `last_verified: YYYY-MM-DD` frontmatter or git commit date; warning > 30 days. App shows a slowdown banner while an update runs; load_bm25() is keyed on bm25.pkl mtime so updates are picked up without restart
 23. Azure MCP Server Phase 1 — read-only tenant context (Sep 28 2026). brain/azure/tenant_context.py: get_tenant_context() -> TenantContext (subscription name/id, resource_groups [{name,location}], vnets [VNet(name, resource_group, location, address_prefixes, subnets[Subnet(name, prefixes)])], fetched_at, error). Subscriptions + RGs via Azure MCP Server: `docker run --rm -i -e AZURE_* <image> --read-only --tool subscription_list --tool group_list` over mcp stdio_client. VNets/subnets via ONE ARM REST GET (Microsoft.Network/virtualNetworks, api 2024-05-01, client-credentials token) because the azure-mcp image has NO network namespace. 30s overall timeout (config.azure_mcp_timeout), 10-min cache on success / 60s on error, threading.Lock, never raises. Missing AZURE_ vars -> error "Azure credentials not configured" instantly. Loads .env itself via python-dotenv (override=False). format_for_prompt(ctx) renders compact summary + "Address ranges already in use (do NOT overlap)". UI: "Ground in my Azure tenant" checkbox (default off, stored as fv["ground_tenant"]); third parallel task in get_brain_context(..., ground_tenant=) ThreadPoolExecutor(max_workers=3); result in st.session_state.last_tenant_ctx (None = not requested); prompt section "## Your Azure Tenant (live, read-only)" with reuse-RG / no-overlap / naming instruction and names-are-data warning; sidebar "🔷 Azure Tenant Context"; score_architecture(tenant_context=str) flags address overlaps as critical constraint_violation. Live fetch ≈9s (container start), cached ≈0ms
 
@@ -148,6 +150,10 @@ Project root: ~/Azure-Architect-Wiki
 10. Microsoft Marketplace SaaS offer listing
 
 ## Key Non-Obvious Patterns (Read Before Modifying)
+
+- STANDING RULE (user, Sep 28 2026): after every change you commit, update this file (.claude/commands/te1-context.md) in the SAME commit — what shipped, new patterns to preserve, open decisions, next steps
+- Legacy flag: chunk.metadata["legacy"] comes from walk_source(legacy_dirs) → Qdrant payload legacy: true; BM25-only hits have no payload, so hybrid_search._payload_to_chunk(payload, config) falls back to config.is_legacy(repo, path). Always go through format_brain_section() when putting Brain hits in a prompt
+- Crystallised pages must never bypass the region check: crystalliser.page_block_reason() is applied in read_all_sources() for source "crystallised"; don't index wiki/semantic any other way
 
 - Bicep is NEVER generated speculatively — only on "Approve Architecture & Generate Bicep" button click
 - Bicep is ALWAYS stripped from LLM history before refinement calls (strip_bicep_from_history())
@@ -188,6 +194,8 @@ Project root: ~/Azure-Architect-Wiki
 
 ## Pending Questions Not Yet Resolved
 
+0. Open KB decisions: whether uae_no_note (medium) should also block crystallisation long-term (currently it does — any region flag blocks); fix-button template for wrong_region_availability flags (none yet)
+
 1. WordPress root directory still unknown (docker ps / find /srv needed on X1 Pro)
 2. Hermes agent on tensoredge.net still unexplained
 3. Public URL for TE-1 customers not yet decided (te1.tensoredge.net?)
@@ -195,7 +203,7 @@ Project root: ~/Azure-Architect-Wiki
 
 ## Next Session Priorities
 
-1. Knowledge base catch-up = FULL REBUILD, blocked until the user sends corrected raw/region-availability files (with last_verified). Then: Start full rebuild → review rebuild.json comparison with the user → switch only on explicit confirmation; keep azure_wiki for switch-back
+1. FULL REBUILD started Sep 28 2026 from the admin panel (`python -m brain.kb.updater --rebuild`) → candidate azure_wiki_<UTC stamp> + brain/store/bm25_<name>.pkl, report in data/kb_update/rebuild.json. Show the user old-vs-new counts per source, the checks and the sample searches; switch ONLY after explicit confirmation (panel checkbox + button, or `python -m brain.kb.index_switch --to <name>`); keep azure_wiki for switch-back
 2. Deploy engine design — builds on Phase 1 tenant context (Azure MCP + SP pattern); design in chat first, needs a separate write-scoped SP + programmatic HITL gate
 3. Azure MCP Phase 2 candidates — group_resource_list for existing resources, quota_usage_check / quota_region_availability_list for capacity grounding
 4. Commercial pages (tensoredge.net, Paddle) — parked until the user revisits

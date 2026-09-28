@@ -50,6 +50,7 @@ def walk_source(
     root_dir: str,
     extra_metadata: dict | None = None,
     exclude_dirs: list[str] | None = None,
+    legacy_dirs: list[str] | None = None,
 ) -> Iterator[RawDocument]:
     """Recursively yield one RawDocument per .md file under root_dir.
 
@@ -57,6 +58,7 @@ def walk_source(
         source_repo:    Logical name for this source (stored in source_repo field).
         root_dir:       Root directory to walk recursively.
         exclude_dirs:   Sub-folders of root_dir (relative, e.g. "articles/foundry") to skip.
+        legacy_dirs:    Sub-folders whose documents get metadata legacy=True.
         extra_metadata: Optional dict merged into each RawDocument's metadata.
                         Use for source-level tags such as
                         {"source_type": "region_availability", "priority": "high"}.
@@ -73,6 +75,7 @@ def walk_source(
     base_meta = extra_metadata or {}
 
     excluded = [os.path.join(str(root_dir), ex) for ex in (exclude_dirs or [])]
+    legacy = [os.path.join(str(root_dir), d).rstrip("/") + "/" for d in (legacy_dirs or [])]
 
     for dirpath, dirs, filenames in os.walk(str(root_dir)):
         if excluded:
@@ -109,6 +112,7 @@ def walk_source(
                     "filename": fname,
                     "rel_path": os.path.relpath(fpath, str(root_dir)),
                     **base_meta,
+                    **({"legacy": True} if any(fpath.startswith(p) for p in legacy) else {}),
                 },
             )
 
@@ -116,6 +120,7 @@ def walk_source(
 _SOURCE_METADATA: dict[str, dict] = {
     "region-availability": {"source_type": "region_availability", "priority": "high"},
     "microsoft-fabric":    {"source_type": "well_architected", "priority": "high"},
+    "crystallised":        {"source_type": "crystallised_session"},
 }
 
 
@@ -126,5 +131,14 @@ def read_all_sources(
     for repo_name, root_dir in config.source_dirs.items():
         extra = _SOURCE_METADATA.get(repo_name)
         excludes = config.source_excludes.get(repo_name)
-        for doc in walk_source(repo_name, root_dir, extra_metadata=extra, exclude_dirs=excludes):
+        legacy = config.legacy_dirs.get(repo_name)
+        for doc in walk_source(repo_name, root_dir, extra_metadata=extra,
+                               exclude_dirs=excludes, legacy_dirs=legacy):
+            if repo_name == "crystallised":
+                from brain.wiki.crystalliser import page_block_reason
+                reason = page_block_reason(doc.file_path)
+                if reason:
+                    print(f"  [WARN] crystallised page NOT indexed: "
+                          f"{os.path.basename(doc.file_path)} — {reason}")
+                    continue
             yield repo_name, doc

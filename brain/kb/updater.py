@@ -55,6 +55,8 @@ SAMPLE_QUERIES = (
     "Azure OpenAI availability in Qatar Central",
     "Microsoft Fabric reliability capacity planning",
     "az network vnet create",
+    "Azure AI Foundry hub project managed network",
+    "production-grade RAG hub-spoke design approved session",
 )
 
 
@@ -198,22 +200,34 @@ def _pull_all(run: Run) -> tuple[dict, str]:
     return pulls, ""
 
 
-def _foundry_under_azure_ai(cfg: BrainConfig) -> dict:
-    """Chunks under azure-ai whose file lives in the excluded articles/foundry folder."""
+def _source_checks(cfg: BrainConfig) -> dict:
+    """Excluded folders absent (articles/foundry, articles/foundry-local under azure-ai),
+    every foundry-classic vector tagged legacy, and how many crystallised chunks made it."""
     from brain.search.bm25_index import BM25Index
     from brain.store.vector_store import get_client
     bm25 = BM25Index.load(cfg.bm25_index_path)
-    in_bm25 = sum(1 for fp, sr in zip(bm25.file_paths, bm25.source_repos)
-                  if sr == "azure-ai" and cfg.is_excluded("azure-ai", fp))
-    client, offset, in_qdrant = get_client(cfg), None, 0
+    excluded_bm25 = sum(1 for fp, sr in zip(bm25.file_paths, bm25.source_repos)
+                        if sr == "azure-ai" and cfg.is_excluded("azure-ai", fp))
+    client, offset = get_client(cfg), None
+    excluded_qdrant = legacy_tagged = legacy_untagged = crystallised = 0
     while True:
         recs, offset = client.scroll(cfg.qdrant_collection, limit=2000, offset=offset,
-                                     with_payload=["source_repo", "file_path"])
-        in_qdrant += sum(1 for r in recs if r.payload.get("source_repo") == "azure-ai"
-                         and cfg.is_excluded("azure-ai", r.payload.get("file_path", "")))
+                                     with_payload=["source_repo", "file_path", "legacy"])
+        for r in recs:
+            sr, fp = r.payload.get("source_repo"), r.payload.get("file_path", "")
+            if sr == "azure-ai" and cfg.is_excluded("azure-ai", fp):
+                excluded_qdrant += 1
+            if sr == "azure-ai" and cfg.is_legacy("azure-ai", fp):
+                if r.payload.get("legacy") is True:
+                    legacy_tagged += 1
+                else:
+                    legacy_untagged += 1
+            crystallised += sr == "crystallised"
         if offset is None:
             break
-    return {"bm25": in_bm25, "qdrant": in_qdrant}
+    return {"excluded_under_azure_ai": {"bm25": excluded_bm25, "qdrant": excluded_qdrant},
+            "legacy_foundry_classic": {"tagged": legacy_tagged, "untagged": legacy_untagged},
+            "crystallised_vectors": crystallised}
 
 
 def _samples(cfg: BrainConfig) -> dict[str, list[dict]]:
@@ -269,7 +283,8 @@ def run_rebuild(run: Run, dry_run: bool, force: bool) -> dict:
     old_snap, new_snap = snapshot(serving), snapshot(target)
     missing_vectors = {src: v["chunks"] - (v["vectors"] or 0)
                        for src, v in new_snap["sources"].items() if v["chunks"] != v["vectors"]}
-    foundry = _foundry_under_azure_ai(target)
+    src_checks = _source_checks(target)
+    excl = src_checks["excluded_under_azure_ai"]
     report = {
         "serving": {"collection": serving.qdrant_collection, "bm25_path": serving.bm25_index_path,
                     "snapshot": old_snap},
@@ -277,8 +292,10 @@ def run_rebuild(run: Run, dry_run: bool, force: bool) -> dict:
                       "manifest": target.manifest_path, "snapshot": new_snap},
         "checks": {
             "missing_vectors": missing_vectors,
-            "foundry_chunks_under_azure_ai": foundry,
-            "passed": not missing_vectors and foundry["bm25"] == 0 and foundry["qdrant"] == 0,
+            **src_checks,
+            "passed": (not missing_vectors and excl["bm25"] == 0 and excl["qdrant"] == 0
+                       and src_checks["legacy_foundry_classic"]["untagged"] == 0
+                       and src_checks["legacy_foundry_classic"]["tagged"] > 0),
         },
         "samples": {"serving": _samples(serving), "candidate": _samples(target)},
         "pulls": pulls,

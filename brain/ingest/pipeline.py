@@ -474,6 +474,7 @@ def run_incremental(config: BrainConfig = CONFIG, summary_path: str = "") -> dic
             source_repo=repo_name,
             file_path=file_path,
             title=title,
+            metadata={"legacy": True} if config.is_legacy(repo_name, file_path) else {},
         )
         chunks = chunk_document(
             doc,

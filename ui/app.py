@@ -1,5 +1,7 @@
 import sys
 import os
+import html
+import logging
 import re
 import time
 import json
@@ -17,6 +19,7 @@ from brain.models import SearchResult
 from brain.search.bm25_index import BM25Index
 from brain.search.hybrid_search import hybrid_search
 from brain.search.learn_mcp import query_learn_mcp
+from brain.search.context_format import format_brain_section
 from brain.azure.tenant_context import TenantContext, get_tenant_context, format_for_prompt
 from brain.db.database import (
     init_db,
@@ -60,6 +63,8 @@ st.markdown("""
     .chunk-score { color: #50e6ff; font-weight: 600; }
     .chunk-repo  { color: #a0a0a0; }
     .stale-badge { color: #ffa500; font-size: 0.78em; font-weight: 600; margin-left: 6px; }
+    .crystal-badge { color: #b388ff; font-size: 0.78em; font-weight: 600; margin-left: 6px; }
+    .legacy-badge  { color: #9e9e9e; font-size: 0.78em; font-weight: 600; margin-left: 6px; }
     .guest-banner {
         background: #1a1a2e; border: 1px solid #444; border-radius: 6px;
         padding: 8px 14px; margin-bottom: 12px; font-size: 0.88em;
@@ -186,25 +191,8 @@ def get_brain_context(
             tenant_ctx = TenantContext(fetched_at=time.time(), error="Azure MCP disabled in config")
         st.session_state.last_tenant_ctx = tenant_ctx
 
-    # Build Brain section for LLM prompt
-    if brain_err:
-        brain_section = (
-            "## Architecture Knowledge (TE-1 Brain — curated, confidence-scored)\n"
-            f"{brain_err}"
-        )
-    else:
-        lines = ["## Architecture Knowledge (TE-1 Brain — curated, confidence-scored)\n"]
-        for i, h in enumerate(local_hits, 1):
-            content = h.chunk.content[:800].replace("\n", " ").strip()
-            stale_note = " [STALE]" if h.is_stale else ""
-            lines.append(
-                f"[{i}] Title:  {h.chunk.title or 'Untitled'}{stale_note}\n"
-                f"    Source: {h.chunk.source_repo}\n"
-                f"    Score:  {h.fused_score:.5f}\n"
-                f"    Text:   {content}\n"
-            )
-        lines.append("--- END CONTEXT ---\n")
-        brain_section = "\n".join(lines)
+    # Build Brain section for LLM prompt (legacy Foundry chunks under their own heading)
+    brain_section = format_brain_section(local_hits, brain_err)
 
     # Build Learn MCP section for LLM prompt
     if learn_hits:
@@ -605,6 +593,8 @@ def _reset_arch_state() -> None:
     st.session_state.auto_scores            = None
     st.session_state.auto_fix_triggered     = False
     st.session_state.auto_fix_message       = ""
+    st.session_state.crystallised_path      = ""
+    st.session_state.crystallise_warning    = ""
 
 
 def _load_arch_into_session(arch_id: int) -> None:
@@ -755,6 +745,7 @@ _defaults: dict = {
     "show_save_input":          False,
     "arch_saved":               False,
     "crystallised_path":        "",
+    "crystallise_warning":      "",
     "eval_rating":              None,
     "eval_submitted":           False,
     "eval_session_id":          "",
@@ -884,10 +875,14 @@ def update_brain_context() -> None:
         if hits:
             st.caption(f"{len(hits)} chunks retrieved")
             for i, h in enumerate(hits, 1):
-                title = (h.chunk.title or "Untitled")[:55]
-                repo  = h.chunk.source_repo
+                title = html.escape((h.chunk.title or "Untitled")[:55])
+                repo  = html.escape(h.chunk.source_repo or "")
                 score = h.fused_score
                 stale_html = '<span class="stale-badge">⚠️ Stale</span>' if h.is_stale else ""
+                if h.chunk.source_repo == "crystallised":
+                    stale_html += '<span class="crystal-badge">🧠 Crystallised session</span>'
+                if h.chunk.metadata.get("legacy"):
+                    stale_html += '<span class="legacy-badge">🕰️ Legacy (hub-based Foundry)</span>'
                 st.markdown(
                     f'<div class="chunk-card">'
                     f"<strong>[{i}] {title}</strong>{stale_html}<br>"
@@ -1084,16 +1079,19 @@ def _do_approve() -> None:
              if msg["role"] == "assistant"),
             "",
         )
-        wiki_path = crystallise_session({
+        crys = crystallise_session({
+            "approved":             True,  # _do_approve is the single approve path
             "description":          fv_approve.get("description", ""),
             "form_values":          fv_approve,
             "messages":             strip_bicep_from_history(st.session_state.llm_history),
             "retrieved_chunks":     st.session_state.last_hits,
             "architecture_summary": strip_bicep(last_assist),
         })
-        st.session_state.crystallised_path = wiki_path
-    except Exception:
-        pass
+        st.session_state.crystallised_path    = crys.path
+        st.session_state.crystallise_warning  = crys.warning
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Crystallisation failed")
+        st.session_state.crystallise_warning = f"Session could not be crystallised: {exc}"
 
     st.rerun()
 
@@ -1473,6 +1471,8 @@ if st.session_state.architecture_generated:
             f"🧠 Session crystallised into "
             f"`wiki/semantic/{os.path.basename(st.session_state.crystallised_path)}`"
         )
+    if st.session_state.get("crystallise_warning"):
+        st.warning(f"⚠️ {md_escape_dollars(st.session_state.crystallise_warning)}")
 
     if st.session_state.approved_bicep:
         st.success(f"Bicep template ready: **{st.session_state.bicep_filename}**")

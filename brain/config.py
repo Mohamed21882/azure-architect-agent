@@ -72,20 +72,35 @@ class BrainConfig:
             "cli":                  os.path.join(r, "raw", "cli"),
             "region-availability":  os.path.join(r, "raw", "region-availability"),
             "microsoft-fabric":     os.path.join(r, "raw", "microsoft-fabric"),
+            "crystallised":         os.path.join(r, "wiki", "semantic"),
         }
 
     @property
     def source_excludes(self) -> dict[str, list[str]]:
         """Sub-folders (relative to the source dir) never ingested for that source.
         azure-ai and azure-foundry are both clones of azure-ai-docs; Foundry content is
-        owned by the azure-foundry source, so azure-ai must not index it too."""
-        return {"azure-ai": ["articles/foundry"]}
+        owned by the azure-foundry source, so azure-ai must not index it too. Foundry
+        Local is an on-device runtime, not an Azure architecture concern."""
+        return {"azure-ai": ["articles/foundry", "articles/foundry-local"]}
+
+    @property
+    def legacy_dirs(self) -> dict[str, list[str]]:
+        """Sub-folders whose chunks are tagged legacy: true — kept for existing
+        deployments, presented separately and never used for new designs."""
+        return {"azure-ai": ["articles/foundry-classic"]}
+
+    def _under(self, repo_name: str, abs_path: str, prefixes: list[str]) -> bool:
+        root = self.source_dirs.get(repo_name, "")
+        if not root or not abs_path:
+            return False
+        rel = os.path.relpath(abs_path, root).replace(os.sep, "/")
+        return any(rel == p or rel.startswith(p.rstrip("/") + "/") for p in prefixes)
 
     def is_excluded(self, repo_name: str, abs_path: str) -> bool:
-        root = self.source_dirs.get(repo_name, "")
-        rel = os.path.relpath(abs_path, root).replace(os.sep, "/")
-        return any(rel == ex or rel.startswith(ex.rstrip("/") + "/")
-                   for ex in self.source_excludes.get(repo_name, []))
+        return self._under(repo_name, abs_path, self.source_excludes.get(repo_name, []))
+
+    def is_legacy(self, repo_name: str, abs_path: str) -> bool:
+        return self._under(repo_name, abs_path, self.legacy_dirs.get(repo_name, []))
 
     @property
     def manifest_path(self) -> str:

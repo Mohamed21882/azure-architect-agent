@@ -80,7 +80,11 @@ def _freshness_multiplier(age_days: float) -> float:
     return 0.75
 
 
-def _payload_to_chunk(payload: dict) -> Chunk:
+def _payload_to_chunk(payload: dict, config: BrainConfig | None = None) -> Chunk:
+    # BM25-only hits carry no Qdrant payload flags, so legacy also falls back to the path
+    legacy = bool(payload.get("legacy")) or bool(
+        config and config.is_legacy(payload.get("source_repo", ""), payload.get("file_path", ""))
+    )
     return Chunk(
         chunk_id=payload.get("chunk_id", ""),
         doc_id=payload.get("doc_id", ""),
@@ -95,6 +99,7 @@ def _payload_to_chunk(payload: dict) -> Chunk:
         source_count=payload.get("source_count", 1),
         reinforcement_count=payload.get("reinforcement_count", 0),
         last_confirmed_at=payload.get("last_confirmed_at", ""),
+        metadata={"legacy": True} if legacy else {},
         embedding=None,
     )
 
@@ -169,7 +174,7 @@ def hybrid_search(
     results: list[SearchResult] = []
     for cid, rrf in ranked:
         p = payloads[cid]
-        chunk = _payload_to_chunk(p)
+        chunk = _payload_to_chunk(p, config)
         age = _compute_age_days(chunk.last_confirmed_at, chunk.file_path)
         half_life = _get_half_life(chunk, config)
         decayed_conf = _live_decayed_confidence(chunk, half_life, age)

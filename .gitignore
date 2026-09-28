@@ -33,3 +33,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Local file drop-off for curated source updates (not versioned)
+downloads/
