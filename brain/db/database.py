@@ -100,9 +100,14 @@ def init_db() -> None:
 
 # ── Users ──────────────────────────────────────────────────────────────────
 
+def hash_password(password: str) -> str:
+    """bcrypt hash used for every stored password (register and reset)."""
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
 def create_user(username: str, email: str, password: str) -> dict | None:
     """Create a new user. Returns user dict or None if username/email already taken."""
-    pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    pw_hash = hash_password(password)
     now = datetime.now(timezone.utc).isoformat()
     try:
         with _conn() as con:
@@ -131,6 +136,29 @@ def authenticate_user(username: str, password: str) -> dict | None:
     with _conn() as con:
         con.execute("UPDATE users SET last_login = ? WHERE id = ?", (now, row["id"]))
     return {"id": row["id"], "username": row["username"], "email": row["email"]}
+
+
+def user_exists(username: str) -> bool:
+    with _conn() as con:
+        return con.execute(
+            "SELECT 1 FROM users WHERE username = ?", (username,)
+        ).fetchone() is not None
+
+
+def reset_password(username: str, new_password: str) -> bool:
+    """Set a new password and revoke the user's sessions. False if no such user."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT id FROM users WHERE username = ?", (username,)
+        ).fetchone()
+        if not row:
+            return False
+        con.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (hash_password(new_password), row["id"]),
+        )
+        con.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],))
+    return True
 
 
 # ── Sessions ───────────────────────────────────────────────────────────────
