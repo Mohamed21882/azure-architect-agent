@@ -3,8 +3,9 @@
 - azure-ai excludes articles/foundry (owned by azure-foundry) and articles/foundry-local
 - azure-ai articles/foundry-classic is kept but tagged legacy: true and presented under a
   separate prompt heading, never for new designs
-- wiki/semantic is the "crystallised" source; only approved sessions crystallise, and a
-  page failing the scorer's Azure OpenAI region check is written but never indexed
+- wiki/semantic is the "crystallised" source; only approved sessions crystallise. A page is
+  written but never indexed when the final design has a critical scorer flag or the Azure
+  OpenAI data-flow flag; other medium/low flags (budget risk etc.) do not block
 
 Run: PYTHONPATH=. venv/bin/python -m unittest discover -s tests -v
 """
@@ -24,6 +25,7 @@ from brain.models import Chunk, IngestSource, SearchResult
 from brain.search.context_format import (
     CRYSTALLISED_LABEL, LEGACY_HEADING, format_brain_section,
 )
+from brain.eval.auto_scorer import blocks_crystallisation
 from brain.search.hybrid_search import _payload_to_chunk
 from brain.wiki import crystalliser
 
@@ -31,6 +33,18 @@ QATAR_OPENAI = ("Private RAG in Qatar Central. Azure OpenAI gpt-4o is deployed i
                 "behind a private endpoint.")
 GOOD_DESIGN = ("Private RAG in Qatar Central with Azure AI Search and Storage. Azure OpenAI runs "
                "in UAE North; prompts and responses leave Qatar for inference.")
+UAE_NO_NOTE = ("Private RAG in Qatar Central with Azure AI Search and Storage. Azure OpenAI is "
+               "deployed in UAE North with a private endpoint.")
+
+BUDGET_MEDIUM = {"severity": "medium", "category": "budget_risk",
+                 "message": "Azure Firewall Premium pushes cost close to the budget ceiling"}
+LOW_NOTE = {"severity": "low", "category": "operational_gap", "message": "Consider tagging policy"}
+CRITICAL_OTHER = {"severity": "critical", "category": "constraint_violation",
+                  "message": "Storage account allows public network access despite the no-public-IP constraint"}
+DATA_FLOW_FLAG = {"severity": "medium", "category": "incomplete_specification",
+                  "rule": "openai_data_flow",
+                  "message": "The design calls Azure OpenAI in UAE North but does not state that "
+                             "prompts and responses leave Qatar; document this cross-border data flow."}
 
 
 def _write(path: str, text: str) -> None:
@@ -105,6 +119,21 @@ class PromptFormatTests(unittest.TestCase):
         self.assertIn(CRYSTALLISED_LABEL, out)
 
 
+class BlockingRuleTests(unittest.TestCase):
+    def test_what_blocks(self):
+        self.assertTrue(blocks_crystallisation(CRITICAL_OTHER))
+        self.assertTrue(blocks_crystallisation(DATA_FLOW_FLAG))
+        self.assertTrue(blocks_crystallisation({"severity": "critical", "category": "budget_risk",
+                                                "message": "10x over budget"}))
+
+    def test_what_does_not_block(self):
+        self.assertFalse(blocks_crystallisation(BUDGET_MEDIUM))
+        self.assertFalse(blocks_crystallisation(LOW_NOTE))
+        self.assertFalse(blocks_crystallisation({"severity": "medium", "category": "incomplete_specification",
+                                                 "message": "Add diagnostics settings"}))
+        self.assertFalse(blocks_crystallisation("auto-score unavailable"))
+
+
 class CrystalliserGateTests(FixtureRoot):
     def setUp(self) -> None:
         super().setUp()
@@ -116,10 +145,39 @@ class CrystalliserGateTests(FixtureRoot):
         self._patch.stop()
         super().tearDown()
 
-    def _session(self, summary: str, approved=True) -> dict:
+    def _session(self, summary: str, approved=True, flags=None) -> dict:
         return {"approved": approved, "description": "Private RAG test",
                 "form_values": {"region": "Qatar Central"}, "messages": [],
-                "retrieved_chunks": [], "architecture_summary": summary}
+                "retrieved_chunks": [], "architecture_summary": summary, "flags": flags or []}
+
+    def _crystallise(self, summary: str, flags=None):
+        with mock.patch.object(crystalliser, "_ingest_wiki_page", return_value="") as ingest:
+            res = crystalliser.crystallise_session(self._session(summary, flags=flags), self.cfg)
+        return res, ingest
+
+    def test_budget_and_low_flags_do_not_block(self):
+        res, ingest = self._crystallise(GOOD_DESIGN, [BUDGET_MEDIUM, LOW_NOTE])
+        ingest.assert_called_once()
+        self.assertTrue(res.indexed, res.warning)
+
+    def test_critical_flag_blocks(self):
+        res, ingest = self._crystallise(GOOD_DESIGN, [BUDGET_MEDIUM, CRITICAL_OTHER])
+        ingest.assert_not_called()
+        self.assertFalse(res.indexed)
+        self.assertIn("critical flag (constraint_violation)", res.warning)
+        self.assertNotIn("budget", res.warning.lower())
+        # the block is recorded in the page, so rebuilds skip it too
+        self.assertTrue(crystalliser.page_block_reason(res.path))
+
+    def test_data_flow_flag_blocks(self):
+        res, ingest = self._crystallise(GOOD_DESIGN, [DATA_FLOW_FLAG])
+        ingest.assert_not_called()
+        self.assertIn("medium flag (incomplete_specification)", res.warning)
+
+    def test_data_flow_detected_from_text_without_flags(self):
+        res, ingest = self._crystallise(UAE_NO_NOTE, [])
+        ingest.assert_not_called()
+        self.assertIn("region check failed (medium)", res.warning)
 
     def test_unapproved_session_is_refused(self):
         with self.assertRaises(ValueError):
@@ -164,6 +222,20 @@ def _services_up() -> bool:
 class CrystalliserLiveIndexTest(FixtureRoot):
     """Real embed + upsert into a throwaway collection and scratch BM25 file."""
 
+    def test_update_running_skips_indexing_with_warning(self):
+        import fcntl
+        import brain.kb.status as kb_status
+        lock_path = os.path.join(self.root, "update.lock")
+        with open(lock_path, "a+") as held, \
+             mock.patch.object(kb_status, "LOCK_PATH", lock_path), \
+             mock.patch.object(crystalliser, "_WIKI_SEMANTIC_DIR", os.path.join(self.root, "wiki", "semantic")):
+            fcntl.flock(held, fcntl.LOCK_EX)
+            res = crystalliser.crystallise_session({
+                "approved": True, "description": "Locked", "form_values": {"region": "Qatar Central"},
+                "messages": [], "retrieved_chunks": [], "architecture_summary": GOOD_DESIGN}, self.cfg)
+        self.assertFalse(res.indexed)
+        self.assertIn("update is running", res.warning)
+
     def test_page_lands_in_qdrant_and_bm25_as_crystallised(self):
         from brain.search.bm25_index import BM25Index
         from brain.store.vector_store import ensure_collection, get_client
@@ -172,8 +244,11 @@ class CrystalliserLiveIndexTest(FixtureRoot):
         BM25Index.empty().save(cfg.bm25_index_path)
         client = get_client(cfg)
         ensure_collection(client, cfg)
+        import brain.kb.status as kb_status
         try:
-            with mock.patch.object(crystalliser, "_WIKI_SEMANTIC_DIR", os.path.join(self.root, "wiki", "semantic")):
+            # private lock file: the real one may be held by a running rebuild
+            with mock.patch.object(crystalliser, "_WIKI_SEMANTIC_DIR", os.path.join(self.root, "wiki", "semantic")), \
+                 mock.patch.object(kb_status, "LOCK_PATH", os.path.join(self.root, "update.lock")):
                 res = crystalliser.crystallise_session({
                     "approved": True, "description": "Private RAG live test",
                     "form_values": {"region": "Qatar Central"}, "messages": [],

@@ -214,6 +214,7 @@ def _apply_openai_region_rule(flags: list, architecture_summary: str, form_value
     if verdict == "qatar":
         kept.insert(0, {
             "severity": "critical", "category": "wrong_region_availability",
+            "rule": "openai_region",
             "message": "Azure OpenAI is placed in Qatar Central, where no Azure OpenAI models "
                        "can be deployed; deploy the models in UAE North and state that prompts "
                        "and responses leave Qatar.",
@@ -221,10 +222,20 @@ def _apply_openai_region_rule(flags: list, architecture_summary: str, form_value
     elif verdict == "uae_no_note":
         kept.append({
             "severity": "medium", "category": "incomplete_specification",
+            "rule": "openai_data_flow",
             "message": "The design calls Azure OpenAI in UAE North but does not state that "
                        "prompts and responses leave Qatar; document this cross-border data flow.",
         })
     return kept
+
+
+def blocks_crystallisation(flag: object) -> bool:
+    """Whether a scorer flag keeps a design out of the Brain: every critical flag, plus the
+    Azure OpenAI data-flow flag (medium). Other medium/low flags (budget risk, operational
+    gaps, notes) never block."""
+    if not isinstance(flag, dict):
+        return False
+    return flag.get("severity") == "critical" or flag.get("rule") == "openai_data_flow"
 
 
 def _call_llm(

@@ -79,6 +79,25 @@ def region_block_reason(architecture_text: str, region: str) -> str:
     return ""
 
 
+def crystallisation_block_reason(architecture_text: str, region: str,
+                                 flags: list | None = None) -> str:
+    """Why an approved design must stay out of the Brain ("" = index it).
+
+    Blocks on the region check run on the final text, on every critical scorer flag and on
+    the Azure OpenAI data-flow flag. Other medium/low flags (budget risk etc.) never block."""
+    from brain.eval.auto_scorer import blocks_crystallisation
+    reasons = []
+    region_reason = region_block_reason(architecture_text, region)
+    if region_reason:
+        reasons.append(region_reason)
+    for f in flags or []:
+        if not blocks_crystallisation(f) or (region_reason and f.get("rule")):
+            continue  # rule flags duplicate the region check just run on the same text
+        msg = " ".join(str(f.get("message", "")).split())[:200]
+        reasons.append(f"{f.get('severity')} flag ({f.get('category', 'unknown')}): {msg}")
+    return "; ".join(dict.fromkeys(reasons))
+
+
 def page_block_reason(file_path: str) -> str:
     """Why a crystallised page must not be indexed ("" = index it). Used at crystallisation
     time and by full rebuilds, so a page blocked once can never slip in later."""
@@ -128,7 +147,8 @@ def crystallise_session(
 
     Args:
         session: Dict with keys: approved (must be True), description, form_values,
-                 messages, retrieved_chunks, architecture_summary.
+                 messages, retrieved_chunks, architecture_summary, and optionally flags
+                 (scorer flags for the FINAL design; see crystallisation_block_reason).
         config:  BrainConfig instance (defaults to project CONFIG).
 
     Raises:
@@ -181,8 +201,8 @@ def crystallise_session(
 
     decisions_md = "\n".join(f"- {d}" for d in key_decisions)
 
-    block = region_block_reason(architecture_summary, region)
-    index_fm = f"index: false\nindex_blocked: {block}\n" if block else ""
+    block = crystallisation_block_reason(architecture_summary, region, session.get("flags"))
+    index_fm = f"index: false\nindex_blocked: {' '.join(block.split())}\n" if block else ""
 
     page_content = f"""---
 title: {_derive_title(description)}

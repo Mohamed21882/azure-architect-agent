@@ -591,6 +591,7 @@ def _reset_arch_state() -> None:
     st.session_state.eval_submitted         = False
     st.session_state.eval_session_id        = str(uuid.uuid4())
     st.session_state.auto_scores            = None
+    st.session_state.auto_scores_history_len = 0
     st.session_state.auto_fix_triggered     = False
     st.session_state.auto_fix_message       = ""
     st.session_state.crystallised_path      = ""
@@ -636,6 +637,7 @@ def _load_arch_into_session(arch_id: int) -> None:
     st.session_state.eval_submitted         = False
     st.session_state.eval_session_id        = str(uuid.uuid4())
     st.session_state.auto_scores            = None
+    st.session_state.auto_scores_history_len = 0
 
 
 # ── Landing screen ─────────────────────────────────────────────────────────
@@ -750,6 +752,7 @@ _defaults: dict = {
     "eval_submitted":           False,
     "eval_session_id":          "",
     "auto_scores":              None,
+    "auto_scores_history_len":  0,      # len(llm_history) the scores were computed for
     "auto_fix_triggered":       False,
     "auto_fix_message":         "",
 }
@@ -1040,6 +1043,38 @@ def render_issues(issues: list, form_values: dict) -> None:
 
 # ── Approve / eval helpers ─────────────────────────────────────────────────
 
+def _score_design(summary: str, fv: dict, hits: list) -> dict:
+    """Run the auto-scorer on one design (the same inputs everywhere it is scored)."""
+    from brain.eval.auto_scorer import score_architecture
+    region_chunks = [
+        {"text": h.chunk.content, "title": h.chunk.title or ""}
+        for h in hits
+        if "region-availability" in (h.chunk.source_repo or "")
+    ]
+    tctx = st.session_state.get("last_tenant_ctx")
+    return score_architecture(
+        architecture_summary=summary,
+        form_values=fv,
+        retrieved_chunks=hits,
+        engine_mode=engine_mode,
+        model=selected_model,
+        provider=provider,
+        api_key=api_key,
+        context_chunks=region_chunks or None,
+        tenant_context=format_for_prompt(tctx) if tctx is not None and not tctx.error else None,
+    )
+
+
+def _flags_for_final_design(summary: str, fv: dict) -> list:
+    """Scorer flags for the design being approved. The on-screen scores are from the first
+    generation; after any refinement they describe an older design, so rescore."""
+    if (st.session_state.get("auto_scores")
+            and st.session_state.get("auto_scores_history_len") == len(st.session_state.llm_history)):
+        return st.session_state.auto_scores.get("flags", [])
+    with st.spinner("📊 Checking the final design before adding it to the Brain…"):
+        return _score_design(summary, fv, st.session_state.get("last_hits", [])).get("flags", [])
+
+
 def _do_approve() -> None:
     """Reinforce Brain, generate Bicep, and crystallise the session."""
     fv_approve    = st.session_state.form_values
@@ -1086,6 +1121,7 @@ def _do_approve() -> None:
             "messages":             strip_bicep_from_history(st.session_state.llm_history),
             "retrieved_chunks":     st.session_state.last_hits,
             "architecture_summary": strip_bicep(last_assist),
+            "flags":                _flags_for_final_design(strip_bicep(last_assist), fv_approve),
         })
         st.session_state.crystallised_path    = crys.path
         st.session_state.crystallise_warning  = crys.warning
@@ -1257,28 +1293,9 @@ if submit:
     st.session_state.architecture_generated = True
 
     try:
-        from brain.eval.auto_scorer import score_architecture
         with st.spinner("📊 Scoring architecture…"):
-            _region_chunks = [
-                {"text": h.chunk.content, "title": h.chunk.title or ""}
-                for h in hits
-                if "region-availability" in (h.chunk.source_repo or "")
-            ]
-            _tctx = st.session_state.get("last_tenant_ctx")
-            _tenant_for_scorer = (
-                format_for_prompt(_tctx) if _tctx is not None and not _tctx.error else None
-            )
-            st.session_state.auto_scores = score_architecture(
-                architecture_summary=response,
-                form_values=fv,
-                retrieved_chunks=hits,
-                engine_mode=engine_mode,
-                model=selected_model,
-                provider=provider,
-                api_key=api_key,
-                context_chunks=_region_chunks or None,
-                tenant_context=_tenant_for_scorer,
-            )
+            st.session_state.auto_scores = _score_design(response, fv, hits)
+            st.session_state.auto_scores_history_len = len(st.session_state.llm_history)
     except Exception:
         st.session_state.auto_scores = None
 
