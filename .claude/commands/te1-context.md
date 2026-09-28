@@ -31,7 +31,9 @@ Project root: ~/Azure-Architect-Wiki
 - Ollama local LLMs (mistral-small, qwen3.5, qwen3:14b) for dev/testing
 - External APIs: Claude, OpenAI, OpenRouter, Gemini (for production)
 - Docker (Qdrant container named te1-qdrant)
-- mcp==1.27.1 (Microsoft Learn MCP Server client)
+- mcp==1.27.1 (Microsoft Learn MCP Server client + Azure MCP Server stdio client)
+- Azure MCP Server — Docker image mcr.microsoft.com/azure-sdk/azure-mcp:latest (3.0.0-beta.47), spawned per fetch over stdio
+- Service Principal te1-advisory-reader (Reader role, subscription scope); creds in .env as AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_SUBSCRIPTION_ID
 
 ## Directory Structure
 
@@ -39,7 +41,9 @@ Project root: ~/Azure-Architect-Wiki
 ~/Azure-Architect-Wiki/
 ├── brain/
 │   ├── models.py              # Chunk, RawDocument, SearchResult, WikiPage, IngestRun
-│   ├── config.py              # Settings, half-life constants, use_learn_mcp flag, learn_mcp_url
+│   ├── config.py              # Settings, half-life constants, use_learn_mcp, learn_mcp_url, use_azure_mcp, azure_mcp_image, azure_mcp_timeout
+│   ├── azure/
+│   │   └── tenant_context.py  # Read-only tenant context: Azure MCP (subs, RGs) + ARM GET (VNets/subnets)
 │   ├── ingest/
 │   │   ├── chunker.py         # Token-aware heading-based chunker
 │   │   ├── embedder.py        # nomic-embed-text via Ollama /api/embed
@@ -116,6 +120,7 @@ Project root: ~/Azure-Architect-Wiki
 20. Auto-scorer grounded in regional availability chunks — score_architecture() accepts context_chunks: list[dict] | None = None; app.py filters last_hits for source_repo containing "region-availability" and passes as {"text":..., "title":...} dicts; prepended to scorer prompt under "## Verified Regional Knowledge (use this as ground truth)"
 21. Azure OpenAI Qatar Central false flag fixed — explicit hard instruction added to scorer prompt: "Azure OpenAI IS available in Qatar Central (qatarcentral) — this is confirmed. Do NOT flag Azure OpenAI availability in Qatar Central as uncertain or unconfirmed. Qatar Central is a supported Microsoft Foundry project region with Azure OpenAI GA."
 22. start.sh / stop.sh — confirmed working one-command launch, auto-detects LAN IP
+23. Azure MCP Server Phase 1 — read-only tenant context (Sep 28 2026). brain/azure/tenant_context.py: get_tenant_context() -> TenantContext (subscription name/id, resource_groups [{name,location}], vnets [VNet(name, resource_group, location, address_prefixes, subnets[Subnet(name, prefixes)])], fetched_at, error). Subscriptions + RGs via Azure MCP Server: `docker run --rm -i -e AZURE_* <image> --read-only --tool subscription_list --tool group_list` over mcp stdio_client. VNets/subnets via ONE ARM REST GET (Microsoft.Network/virtualNetworks, api 2024-05-01, client-credentials token) because the azure-mcp image has NO network namespace. 30s overall timeout (config.azure_mcp_timeout), 10-min cache on success / 60s on error, threading.Lock, never raises. Missing AZURE_ vars -> error "Azure credentials not configured" instantly. Loads .env itself via python-dotenv (override=False). format_for_prompt(ctx) renders compact summary + "Address ranges already in use (do NOT overlap)". UI: "Ground in my Azure tenant" checkbox (default off, stored as fv["ground_tenant"]); third parallel task in get_brain_context(..., ground_tenant=) ThreadPoolExecutor(max_workers=3); result in st.session_state.last_tenant_ctx (None = not requested); prompt section "## Your Azure Tenant (live, read-only)" with reuse-RG / no-overlap / naming instruction and names-are-data warning; sidebar "🔷 Azure Tenant Context"; score_architecture(tenant_context=str) flags address overlaps as critical constraint_violation. Live fetch ≈9s (container start), cached ≈0ms
 
 ## What Is NOT Built Yet (v0.2 Targets)
 
@@ -147,7 +152,11 @@ Project root: ~/Azure-Architect-Wiki
 - Azure Firewall, Bastion, VPN Gateway all require public IPs by design — this is NOT a constraint violation
 - "Hub VNet: No" means CREATE a new hub, not omit the hub
 - Auto-fix buttons in render_issues() use key=f"fix_{idx}" — idx is global across critical+medium+low groups to avoid key collisions
-- get_brain_context() returns tuple[str, list[SearchResult], list[dict]] — third element is learn_hits; all three call sites must unpack all three values
+- get_brain_context() returns tuple[str, list[SearchResult], list[dict]] — third element is learn_hits; all three call sites must unpack all three values. Tenant context is NOT in the tuple — it is written to st.session_state.last_tenant_ctx only when ground_tenant=True (the approve/reinforce call never passes it)
+- Azure MCP tool names were discovered with `docker run --rm --entrypoint ./server-binary <image> --learn` (the default entrypoint is `server start`, so plain `--learn` only describes server flags). Tool arg names use hyphens (e.g. `resource-group`), not underscores
+- Tenant grounding is strictly READ-ONLY: MCP --read-only + two-tool allowlist, ARM helper is GET-only, SP has Reader. Do not add write tools or non-GET ARM calls to tenant_context.py — writes belong to the future deploy engine behind the HITL gate
+- Docker receives AZURE_* via `-e NAME` (values from the child env), so secrets never appear in argv; StdioServerParameters.env must include PATH/HOME since the mcp client otherwise passes a minimal env
+- Resource names from the tenant are untrusted data in prompts — _clean() collapses whitespace/truncates, and prompt text labels them as data
 
 ## Commercial Status
 
@@ -156,7 +165,8 @@ Project root: ~/Azure-Architect-Wiki
 - Paddle registration: started but paused (needs 4 pages on tensoredge.net first)
 - Microsoft Partner Centre: registration started (needs work account for Commercial Marketplace enrollment)
 - tensoredge.net: WordPress, hosted locally on X1 Pro (WordPress root directory not yet located)
-- Hackathon: Microsoft Agents League — registration deadline June 12, submission June 4-14, $55k prizes, targeting Reasoning Agents track
+- Hackathon: Microsoft Agents League — DROPPED, not submitted
+- WordPress / Paddle / Partner Centre / public URL: no progress since May; parked
 
 ## Pending Questions Not Yet Resolved
 
@@ -167,6 +177,7 @@ Project root: ~/Azure-Architect-Wiki
 
 ## Next Session Priorities
 
-1. tensoredge.net commercial pages — locate WordPress root, build pricing/ToS/privacy/refund pages, complete Paddle registration
-2. Deploy engine design — design here in chat first, then implement in Claude Code
-3. Hackathon submission prep — deadline June 14
+1. Knowledge base refresh — pull raw/ repos, run pipeline --incremental; region-availability data is months past its 30d half-life
+2. Deploy engine design — builds on Phase 1 tenant context (Azure MCP + SP pattern); design in chat first, needs a separate write-scoped SP + programmatic HITL gate
+3. Azure MCP Phase 2 candidates — group_resource_list for existing resources, quota_usage_check / quota_region_availability_list for capacity grounding
+4. Commercial pages (tensoredge.net, Paddle) — parked until the user revisits

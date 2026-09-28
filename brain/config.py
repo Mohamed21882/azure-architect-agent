@@ -33,6 +33,11 @@ class BrainConfig:
     use_learn_mcp: bool = True
     learn_mcp_url: str = "https://learn.microsoft.com/api/mcp"
 
+    # --- Azure MCP Server (read-only tenant context) ---
+    use_azure_mcp: bool = True
+    azure_mcp_image: str = "mcr.microsoft.com/azure-sdk/azure-mcp:latest"
+    azure_mcp_timeout: int = 30
+
     # --- Temporal decay half-lives (days) ---
     half_life_region_availability: int = 30
     half_life_api_docs: int = 60
