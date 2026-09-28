@@ -1,165 +1,93 @@
+---
+title: Azure Service Availability — Qatar Central (qatarcentral)
+region: qatarcentral
+last_verified: 2026-09-28
+sources:
+  - https://learn.microsoft.com/azure/reliability/regions-list
+  - https://learn.microsoft.com/azure/reliability/regions-paired
+  - https://learn.microsoft.com/azure/foundry/reference/region-support
+  - https://learn.microsoft.com/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure-region-availability
+  - https://learn.microsoft.com/azure/search/search-region-support
+  - https://learn.microsoft.com/azure/expressroute/expressroute-locations
+  - https://learn.microsoft.com/azure/azure-sql/database/region-availability
+  - https://learn.microsoft.com/azure/azure-netapp-files/replication
+---
+
 # Azure Service Availability — Qatar Central (qatarcentral)
 
-Qatar Central is a Generally Available Azure region located in Doha, Qatar. It is the primary Azure region for customers requiring data residency within the State of Qatar and serves as a hub for Gulf Cooperation Council (GCC) workloads with strict data sovereignty requirements.
+Qatar Central is a generally available Azure region in Doha, used for workloads that need data residency in Qatar.
 
-**Region code:** `qatarcentral`  
-**Geography:** Qatar  
-**Paired region:** UAE North (for disaster recovery)  
-**Data residency:** All data remains within Qatar  
+- **Region code:** `qatarcentral`
+- **Availability zones:** 3
+- **Paired region:** none. Qatar Central is a non-paired region and relies on availability zones for resilience.
+- **ExpressRoute locations:** Doha, Doha2
 
----
-
-## Networking — All GA
+## AI and search (verified)
 
 | Service | Status | Notes |
 |---|---|---|
-| Azure Virtual Network (VNet) | **GA** | Full feature parity |
-| Network Security Groups (NSG) | **GA** | |
-| User Defined Routes (UDR) | **GA** | |
-| Azure Firewall | **GA** | Standard and Premium SKUs available |
-| Azure Firewall Policy | **GA** | |
-| Azure Bastion | **GA** | Standard SKU available |
-| VPN Gateway | **GA** | All SKUs including HighPerformance and UltraPerformance |
-| ExpressRoute | **GA** | ExpressRoute circuits available from local providers |
-| ExpressRoute Global Reach | **GA** | |
-| Azure Application Gateway | **GA** | v2 SKU (WAF and standard) |
-| Azure Load Balancer | **GA** | Standard SKU |
-| Azure Private Link | **GA** | |
-| Private Endpoints | **GA** | |
-| Azure Private DNS Zones | **GA** | |
-| Azure DNS | **GA** | |
-| Virtual Network Peering | **GA** | Including global peering to UAE North |
-| Azure DDoS Protection | **GA** | Standard plan available |
-| NAT Gateway | **GA** | |
-| Azure Traffic Manager | **GA** | |
-| Azure Front Door | **GA** | |
-| Azure Content Delivery Network (CDN) | **GA** | |
+| Azure OpenAI models | **Not available** | No Azure OpenAI models can be deployed in Qatar Central (confirmed with `az cognitiveservices model list --location qatarcentral`, which returns nothing). Use UAE North for inference. See the index rules. |
+| Microsoft Foundry project | Verified | You can create a Foundry project here, but models must be deployed from a region that has them. |
+| Azure AI Search | Verified, with limits | Semantic ranker, agentic retrieval, query rewrite and availability zones are supported. **No AI enrichment (skillsets)**, no serverless, and higher storage limits are not available. Plan chunking and embedding outside the search service. |
+| Azure Speech | Verified | Qatar Central is a supported Speech region. |
 
----
-
-## Compute — All GA
+## Networking
 
 | Service | Status | Notes |
 |---|---|---|
-| Azure Kubernetes Service (AKS) | **GA** | All node pool types, AGIC supported |
-| Azure Virtual Machines | **GA** | Dsv5, Esv5, Fsv2, Lsv3 and more |
-| Virtual Machine Scale Sets (VMSS) | **GA** | |
-| Azure App Service (Web Apps) | **GA** | All pricing tiers |
-| Azure Functions | **GA** | Consumption, Premium, Dedicated plans |
-| Azure Container Instances (ACI) | **GA** | |
-| Azure Container Apps | **GA** | |
-| Azure Batch | **GA** | |
+| Virtual Network, NSG, UDR, VNet peering | Assumed GA | Core networking. |
+| Azure Firewall (Standard, Premium) | Assumed GA | Needs a public IP by design. |
+| Azure Bastion | Assumed GA | Needs a public IP and a /26 AzureBastionSubnet by design. |
+| VPN Gateway | Verified | New gateways must use AZ SKUs (VpnGw1AZ–VpnGw5AZ). Non-AZ SKUs can't be created and retire on 30 September 2026. |
+| ExpressRoute | Verified | Peering locations Doha and Doha2. |
+| Private Link, Private Endpoints, Private DNS Zones | Assumed GA | |
+| Application Gateway v2, Load Balancer Standard, NAT Gateway, DDoS Protection | Assumed GA | |
 
----
+Front Door, Traffic Manager and CDN are global services, not regional ones, so they don't appear here.
 
-## Storage — All GA
-
-| Service | Status | Notes |
-|---|---|---|
-| Azure Blob Storage | **GA** | LRS, ZRS, GRS (paired to UAE North) |
-| Azure Files | **GA** | SMB and NFS |
-| Azure Queues | **GA** | |
-| Azure Tables | **GA** | |
-| Azure Managed Disks | **GA** | Standard HDD, Standard SSD, Premium SSD, Ultra Disk |
-| Azure NetApp Files | **GA** | |
-| Azure Data Lake Storage Gen2 | **GA** | |
-
----
-
-## Databases — GA
+## Compute and containers
 
 | Service | Status | Notes |
 |---|---|---|
-| Azure SQL Database | **GA** | General Purpose, Business Critical tiers |
-| Azure SQL Managed Instance | **GA** | |
-| Azure Database for PostgreSQL Flexible Server | **GA** | |
-| Azure Database for MySQL Flexible Server | **GA** | |
-| Azure Cosmos DB | **GA** | NoSQL API GA. MongoDB API GA. Other APIs: check availability |
-| Azure Cache for Redis | **GA** | C, P SKUs |
-| Azure SQL Server on VMs | **GA** | |
+| AKS | Assumed GA | Spread node pools across the 3 zones. |
+| Virtual Machines, VM Scale Sets | Assumed GA | Check the specific VM series in the portal; availability varies by SKU. |
+| App Service, Functions, Container Apps, Container Instances | Assumed GA | |
+| Container Registry | Assumed GA | |
 
----
-
-## Security and Identity — All GA
+## Storage
 
 | Service | Status | Notes |
 |---|---|---|
-| Azure Key Vault | **GA** | Standard and Premium tiers; HSM-backed |
-| Azure Key Vault Managed HSM | **GA** | |
-| Microsoft Entra ID (Azure AD) | **GA** | Global service, endpoints in region |
-| Managed Identity | **GA** | System-assigned and user-assigned |
-| Azure Policy | **GA** | |
-| Azure RBAC | **GA** | |
-| Microsoft Defender for Cloud | **GA** | |
-| Microsoft Sentinel | **GA** | |
-| Microsoft Defender for Endpoint | **GA** | |
+| Blob, Files, Queues, Tables, Data Lake Gen2 | Assumed GA | Use **LRS or ZRS** for data that must stay in Qatar. Qatar Central has no paired region, so don't assume GRS replicates to UAE North. Confirm any geo-redundant option in the portal before using it. |
+| Managed Disks | Assumed GA | |
+| Azure NetApp Files | Verified | Cross-region replication pairs Qatar Central with **West Europe**, so replicated data leaves the Gulf. |
 
----
-
-## Monitoring and Operations — All GA
+## Databases
 
 | Service | Status | Notes |
 |---|---|---|
-| Azure Monitor | **GA** | |
-| Azure Log Analytics | **GA** | |
-| Application Insights | **GA** | |
-| Azure Alerts | **GA** | |
-| Azure Diagnostic Settings | **GA** | |
-| Azure Advisor | **GA** | |
-| Azure Service Health | **GA** | |
-| Azure Automation | **GA** | |
-| Azure Update Manager | **GA** | |
+| Azure SQL Database | Verified | Serverless supported, up to 80 vCores. |
+| SQL Managed Instance, PostgreSQL Flexible, MySQL Flexible, Cosmos DB, Azure Cache for Redis | Assumed GA | Confirm API and tier support in the portal. |
 
----
-
-## AI and Search
+## Security and monitoring
 
 | Service | Status | Notes |
 |---|---|---|
-| Azure AI Search | **GA** | Formerly Cognitive Search. All tiers including S3 HD. Valid for RAG pipelines. |
-| Azure AI Services (multi-service) | **GA** | Includes Vision, Language, Speech APIs |
-| Azure OpenAI Service | **GA** | Foundry project region supported. Verify model quota per subscription. |
-| Azure Machine Learning | **GA** | |
-| Azure AI Studio | Preview | Limited feature set |
+| Key Vault, Managed HSM, Managed Identity, Policy, RBAC | Assumed GA | Microsoft Entra ID is a global service. |
+| Defender for Cloud, Sentinel, Azure Monitor, Log Analytics, Application Insights | Assumed GA | |
 
----
+## Design guidance for Qatar Central
 
-## Integration and Messaging — All GA
+### RAG and AI workloads
+- Host AI Search, Storage, Cosmos DB, Key Vault and AKS in Qatar Central.
+- Call Azure OpenAI in UAE North. State clearly that prompts and responses leave Qatar.
+- For UAE-resident inference, use a Regional Provisioned deployment in UAE North. Global Standard may process data in any Azure region.
+- Because AI Search here has no skillsets, run chunking and embedding in the application (for example in AKS) and push documents to the index.
+- If the client requires that no data leaves Qatar, the LLM layer is a blocker. Flag it rather than designing around it silently.
 
-| Service | Status | Notes |
-|---|---|---|
-| Azure Service Bus | **GA** | Standard and Premium tiers |
-| Azure Event Hubs | **GA** | Standard and Premium tiers |
-| Azure Event Grid | **GA** | |
-| Azure Logic Apps | **GA** | Standard and Consumption plans |
-| Azure API Management | **GA** | All tiers |
+### Resilience
+- Use zone-redundant SKUs throughout. Qatar Central has no paired region.
+- Any cross-region disaster recovery must name its target region and note that data leaves Qatar.
 
----
-
-## Containers and Registry — All GA
-
-| Service | Status | Notes |
-|---|---|---|
-| Azure Container Registry (ACR) | **GA** | Basic, Standard, Premium |
-| Azure Container Apps | **GA** | |
-| Azure Kubernetes Service (AKS) | **GA** | See Compute section |
-
----
-
-## Architecture Recommendations for Qatar Central
-
-### For RAG / AI Search workloads
-- Deploy Azure AI Search in Qatar Central — it is GA and fully supported
-- Azure OpenAI is available in Qatar Central (Foundry project region). Verify model quota availability per subscription before deployment.
-- Use AKS in Qatar Central for orchestration agents (GA)
-
-### For enterprise workloads (PCI-DSS, ISO 27001)
-- All required security controls are GA: Key Vault, Private Endpoints, Azure Firewall, Bastion, NSG, Sentinel, Defender for Cloud
-- Data never leaves Qatar when using LRS storage and Qatar Central–hosted services
-- Use ExpressRoute for hybrid connectivity with on-premises Qatar data centres
-
-### Hub-and-Spoke networking
-- Azure Firewall (Premium) as hub NVA — fully GA
-- Azure Bastion Standard in hub — fully GA
-- VPN Gateway or ExpressRoute for on-premises — fully GA
-- Private DNS Zones for all PaaS services — fully GA
+### Hybrid connectivity
+- ExpressRoute from Doha or Doha2, or VPN Gateway with an AZ SKU.

@@ -20,8 +20,9 @@ HUB_SPOKE_DESIGN = """## Architecture Summary
 Hub-spoke topology in Qatar Central. A NEW hub VNet (vnet-hub-qc, 10.1.0.0/16) hosts
 Azure Firewall (AzureFirewallSubnet 10.1.0.0/26), Azure Bastion (AzureBastionSubnet
 10.1.1.0/26) and a VPN Gateway (GatewaySubnet 10.1.2.0/27). A spoke VNet (vnet-spoke-rag,
-10.2.0.0/16) is peered to the hub and hosts a private AKS cluster, Azure AI Search and
-Azure OpenAI behind private endpoints with Private DNS zones linked to the hub.
+10.2.0.0/16) is peered to the hub and hosts a private AKS cluster and Azure AI Search
+behind private endpoints with Private DNS zones linked to the hub. Azure OpenAI runs in
+UAE North (Qatar Central has no Azure OpenAI models); prompts and responses leave Qatar.
 Key Vault and Storage use private endpoints; NSGs on every subnet; egress forced through
 the firewall via UDRs. Log Analytics + Azure Monitor collect diagnostics.
 Estimated cost: $4.2k/month within the $5k budget.

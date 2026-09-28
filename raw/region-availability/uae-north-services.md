@@ -1,162 +1,81 @@
+---
+title: Azure Service Availability — UAE North (uaenorth)
+region: uaenorth
+last_verified: 2026-09-28
+sources:
+  - https://learn.microsoft.com/azure/reliability/regions-list
+  - https://learn.microsoft.com/azure/reliability/regions-paired
+  - https://learn.microsoft.com/azure/foundry/reference/region-support
+  - https://learn.microsoft.com/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure-region-availability
+  - https://learn.microsoft.com/azure/search/search-region-support
+  - https://learn.microsoft.com/azure/expressroute/expressroute-locations
+  - https://learn.microsoft.com/azure/azure-sql/database/region-availability
+  - https://learn.microsoft.com/azure/azure-netapp-files/replication
+---
+
 # Azure Service Availability — UAE North (uaenorth)
 
-UAE North is a Generally Available Azure region located in Dubai, United Arab Emirates. It is the most mature Azure region in the Gulf, launched in 2019, and offers the broadest service coverage in the GCC geography. It is the recommended primary region for UAE-based workloads and the disaster recovery pair for Qatar Central.
+UAE North is a generally available Azure region in Dubai. It is the Gulf region with Azure OpenAI models, which makes it the inference region for Qatar Central designs too.
 
-**Region code:** `uaenorth`  
-**Geography:** United Arab Emirates  
-**Paired region:** UAE Central (for disaster recovery)  
-**Data residency:** All data remains within the UAE  
+- **Region code:** `uaenorth`
+- **Availability zones:** 3
+- **Paired region:** UAE Central (Abu Dhabi). UAE Central is access-restricted and meant for disaster recovery within the UAE.
+- **ExpressRoute locations:** Dubai, Dubai2, Abu Dhabi
 
----
+## Azure OpenAI (verified)
 
-## Networking — All GA
+Confirmed with `az cognitiveservices model list --location uaenorth` on 2026-09-28. Available model families include gpt-6 (astra, luna, sol), gpt-5.6 (sol, terra, luna), gpt-5.5, gpt-5.4 (including mini, nano, pro), gpt-5.x codex models, gpt-4.1, gpt-4o, o1, o3, o3-mini, o4-mini, model-router, gpt-image models, text-embedding-3-large, text-embedding-3-small, text-embedding-ada-002 and whisper. The list depends on the subscription, so re-check before committing.
+
+Deployment type decides where inference runs:
+
+| Deployment type | What's available in UAE North | Where inference runs |
+|---|---|---|
+| Global Standard | Most chat and reasoning models | Any Azure region where the model is deployed |
+| Regional Provisioned | gpt-4.1, gpt-4o, gpt-5-mini, gpt-5.1, gpt-6-sol, o1, o3-mini, o4-mini | UAE North only (needs reserved throughput units) |
+| Standard (regional, pay-per-token) | text-embedding-3-large, text-embedding-3-small, text-embedding-ada-002, whisper | UAE North only |
+| Data Zone | Not offered for the Middle East | — |
+
+Data at rest stays in the Middle East and Africa geography for all types. For strict UAE residency of chat inference, recommend Regional Provisioned.
+
+## AI and search (verified)
 
 | Service | Status | Notes |
 |---|---|---|
-| Azure Virtual Network (VNet) | **GA** | Full feature parity |
-| Network Security Groups (NSG) | **GA** | |
-| User Defined Routes (UDR) | **GA** | |
-| Azure Firewall | **GA** | Standard and Premium SKUs |
-| Azure Firewall Policy | **GA** | |
-| Azure Bastion | **GA** | Standard and Developer SKUs |
-| VPN Gateway | **GA** | All SKUs |
-| ExpressRoute | **GA** | Multiple local providers; DE-CIX Frankfurt peering |
-| ExpressRoute Global Reach | **GA** | |
-| Azure Application Gateway | **GA** | v2 WAF and standard |
-| Azure Load Balancer | **GA** | Standard SKU |
-| Azure Private Link | **GA** | |
-| Private Endpoints | **GA** | |
-| Azure Private DNS Zones | **GA** | |
-| Azure DDoS Protection | **GA** | |
-| NAT Gateway | **GA** | |
-| Azure Virtual WAN | **GA** | |
-| Azure Traffic Manager | **GA** | |
-| Azure Front Door | **GA** | |
+| Microsoft Foundry project | Verified | |
+| Azure AI Search | Verified, **capacity-constrained** | Supports AI enrichment, agentic retrieval, semantic ranker, serverless and availability zones. Microsoft currently reports high demand that **prevents creating new search services** here. For new designs, place AI Search in Qatar Central or another region and say why. |
+| Azure Speech | Verified | |
+| Grounding with Bing Search (Foundry Agent Service) | Verified | UAE North is a supported region. |
+| Model router | Verified | Global Standard only. |
 
----
-
-## Compute — All GA
+## Networking
 
 | Service | Status | Notes |
 |---|---|---|
-| Azure Kubernetes Service (AKS) | **GA** | All features including AGIC, Workload Identity |
-| Azure Virtual Machines | **GA** | Broad SKU availability |
-| Virtual Machine Scale Sets | **GA** | |
-| Azure App Service | **GA** | All tiers |
-| Azure Functions | **GA** | All plans |
-| Azure Container Instances | **GA** | |
-| Azure Container Apps | **GA** | |
-| Azure Batch | **GA** | |
-| Azure Dedicated Hosts | **GA** | |
+| Virtual Network, NSG, UDR, VNet peering, Virtual WAN | Assumed GA | |
+| Azure Firewall, Bastion | Assumed GA | Need public IPs by design. |
+| VPN Gateway | Verified | AZ SKUs only for new gateways (VpnGw1AZ–VpnGw5AZ). |
+| ExpressRoute | Verified | Dubai, Dubai2, Abu Dhabi. |
+| Private Link, Private Endpoints, Private DNS, Application Gateway v2, Load Balancer, NAT Gateway | Assumed GA | |
 
----
-
-## Storage — All GA
+## Compute, storage and databases
 
 | Service | Status | Notes |
 |---|---|---|
-| Azure Blob Storage | **GA** | LRS, ZRS, GRS (paired to UAE Central) |
-| Azure Files | **GA** | |
-| Azure Queues | **GA** | |
-| Azure Tables | **GA** | |
-| Azure Managed Disks | **GA** | All tiers including Ultra Disk |
-| Azure NetApp Files | **GA** | |
-| Azure Data Lake Storage Gen2 | **GA** | |
+| AKS, VMs, App Service, Functions, Container Apps, Container Registry | Assumed GA | |
+| Blob, Files, Data Lake Gen2, Managed Disks | Assumed GA | GRS replicates to UAE Central, so data stays in the UAE. |
+| Azure NetApp Files | Verified | Cross-region replication pairs UAE North with **Sweden Central**, so replicated data leaves the Gulf. |
+| Azure SQL Database | Verified | Serverless supported, including zone redundancy at 80 vCores. |
+| SQL Managed Instance, PostgreSQL Flexible, MySQL Flexible, Cosmos DB, Redis | Assumed GA | Confirm API and tier support in the portal. |
 
----
-
-## Databases — All GA
+## Security and monitoring
 
 | Service | Status | Notes |
 |---|---|---|
-| Azure SQL Database | **GA** | All tiers |
-| Azure SQL Managed Instance | **GA** | |
-| Azure Database for PostgreSQL Flexible Server | **GA** | |
-| Azure Database for MySQL Flexible Server | **GA** | |
-| Azure Cosmos DB | **GA** | All APIs: NoSQL, MongoDB, Cassandra, Gremlin, Table |
-| Azure Cache for Redis | **GA** | All SKUs |
-| Azure Synapse Analytics | **GA** | |
+| Key Vault, Managed HSM, Managed Identity, Policy, RBAC | Assumed GA | |
+| Defender for Cloud, Sentinel, Azure Monitor, Log Analytics, Application Insights | Assumed GA | |
 
----
+## Design guidance for UAE North
 
-## Security and Identity — All GA
-
-| Service | Status | Notes |
-|---|---|---|
-| Azure Key Vault | **GA** | Standard, Premium, Managed HSM |
-| Microsoft Entra ID | **GA** | |
-| Managed Identity | **GA** | |
-| Azure Policy | **GA** | |
-| Azure RBAC | **GA** | |
-| Microsoft Defender for Cloud | **GA** | |
-| Microsoft Sentinel | **GA** | |
-| Microsoft Defender for Endpoint | **GA** | |
-| Azure Confidential Computing | **GA** | DCsv3, DCdsv3 VMs |
-
----
-
-## Monitoring — All GA
-
-| Service | Status | Notes |
-|---|---|---|
-| Azure Monitor | **GA** | |
-| Azure Log Analytics | **GA** | |
-| Application Insights | **GA** | |
-| Azure Alerts | **GA** | |
-| Azure Automation | **GA** | |
-
----
-
-## AI and Machine Learning — Strong Coverage
-
-| Service | Status | Notes |
-|---|---|---|
-| Azure OpenAI Service | **GA** | GPT-4o, GPT-4, GPT-35-Turbo, text-embedding-ada-002. Key differentiator vs Qatar Central. |
-| Azure AI Search | **GA** | All tiers |
-| Azure AI Services (multi-service) | **GA** | Vision, Language, Speech, Translator |
-| Azure Machine Learning | **GA** | |
-| Azure AI Studio | **GA** | |
-| Azure AI Foundry | **GA** | |
-| Azure Document Intelligence | **GA** | |
-| Azure Bot Service | **GA** | |
-
----
-
-## Integration — All GA
-
-| Service | Status | Notes |
-|---|---|---|
-| Azure Service Bus | **GA** | All tiers |
-| Azure Event Hubs | **GA** | All tiers |
-| Azure Event Grid | **GA** | |
-| Azure Logic Apps | **GA** | |
-| Azure API Management | **GA** | All tiers |
-| Azure Data Factory | **GA** | |
-
----
-
-## Containers — All GA
-
-| Service | Status | Notes |
-|---|---|---|
-| Azure Container Registry | **GA** | All tiers |
-| Azure Container Apps | **GA** | |
-| Azure Kubernetes Service | **GA** | |
-
----
-
-## Architecture Recommendations for UAE North
-
-### Azure OpenAI in the Gulf
-Both UAE North and Qatar Central are supported Foundry project regions with Azure OpenAI GA. UAE North has a more mature deployment with broader model availability. When designing for Qatar Central, Azure OpenAI can be deployed locally — verify model quota availability per subscription before committing to the region.
-
-### For RAG architectures with Gulf data residency
-Deploy all components — AI Search, Azure OpenAI, and orchestration — within the same region (Qatar Central or UAE North) to satisfy data residency requirements. Cross-region patterns are only required if a specific model or quota is unavailable in the target region.
-
-### Hub-and-spoke in UAE North
-- Mature region with full hub networking support
-- Azure Virtual WAN available for large enterprise topologies
-- ExpressRoute from DU, Etisalat, and international carrier PoPs
-
-### Compliance
-UAE North supports ISO 27001, PCI-DSS, SOC 1/2/3, and GDPR compliance frameworks. UAE Central Cybersecurity Council (UAE CSSA) requirements are met by UAE North deployments.
+- For RAG with UAE data residency, keep all components in UAE North and use Regional Provisioned for chat models, with Standard regional embeddings.
+- New AI Search services currently can't be created here. Check before designing around it.
+- When serving a Qatar Central architecture, UAE North hosts the model endpoints. Connect over private endpoints and cross-region VNet peering, and document the cross-border data flow.

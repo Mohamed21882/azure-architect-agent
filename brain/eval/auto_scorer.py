@@ -74,10 +74,16 @@ def _build_prompt(
         "MUST CREATE a new hub VNet. A hub-spoke topology with a newly created hub VNet is "
         "the CORRECT response to this constraint. Do NOT flag a new or dedicated hub VNet, "
         "or a hub-spoke topology, as a constraint violation when Existing Hub VNet is No.\n\n"
+        "IMPORTANT — Azure OpenAI and Qatar Central:\n"
+        "Azure OpenAI is NOT deployable in Qatar Central (qatarcentral): no Azure OpenAI "
+        "models are available there (a Foundry project can exist there, but not model "
+        "deployments). An architecture that places an Azure OpenAI deployment in Qatar "
+        'Central is a "critical" issue with category "wrong_region_availability". '
+        "Calling Azure OpenAI in UAE North from a Qatar Central design is the CORRECT "
+        "pattern and is not a violation, but the design must state that prompts and "
+        "responses leave Qatar; if it does not, add a \"medium\" flag with category "
+        '"incomplete_specification".\n\n'
         "IMPORTANT — service availability flags:\n"
-        "Azure OpenAI IS available in Qatar Central (qatarcentral) — this is confirmed. "
-        "Do NOT flag Azure OpenAI availability in Qatar Central as uncertain or unconfirmed. "
-        "Qatar Central is a supported Microsoft Foundry project region with Azure OpenAI GA. "
         "Only flag regional availability if you have confirmed evidence of unavailability.\n"
         "You must ONLY flag service availability concerns if you have high confidence "
         "based on well-established facts. Do NOT flag service availability for mainstream "
@@ -136,6 +142,88 @@ def _drop_hub_false_positives(flags: list[dict], form_values: dict) -> list[dict
         ):
             continue
         kept.append(f)
+    return kept
+
+
+_AOAI = re.compile(r"azure\s*open\s*ai|\baoai\b|\bgpt[- ]?\d|openai", re.IGNORECASE)
+_QATAR = re.compile(r"qatar\s*central|qatarcentral", re.IGNORECASE)
+_UAE = re.compile(r"uae\s*north|uaenorth", re.IGNORECASE)
+_NEGATED = re.compile(r"\bnot\b|unavailable|cannot|can't|no azure openai|isn't|is not", re.IGNORECASE)
+_EGRESS_NOTE = re.compile(
+    r"(leave|leaves|leaving|exit|exits|outside|out of)\s+(of\s+)?(qatar|the country)"
+    r"|cross[- ](border|region)\s+(data\s+)?(flow|transfer|egress)"
+    r"|(prompts?|responses?|inference|data)\b.{0,60}\b(sent|routed|processed|transit\w*)\s+(to|in)\s+(the\s+)?uae",
+    re.IGNORECASE,
+)
+_OPENAI_REGION_FLAG = re.compile(r"(openai|gpt|model)", re.IGNORECASE)
+
+
+def openai_region_verdict(architecture_summary: str, form_values: dict) -> str:
+    """Where the design puts Azure OpenAI, relative to Qatar Central.
+
+    Returns "none" (no Azure OpenAI), "qatar" (placed in Qatar Central, explicitly or by
+    a Qatar Central design giving it no other region), "uae_with_note" / "uae_no_note"
+    (UAE North, with or without the prompts-leave-Qatar statement) or "other".
+    """
+    text = architecture_summary or ""
+    aoai = [seg for seg in _segments(text) if _AOAI.search(seg)]
+    if not aoai:
+        return "none"
+    if any(_QATAR.search(seg) and not _UAE.search(seg) and not _NEGATED.search(seg) for seg in aoai):
+        return "qatar"
+    said_not_qatar = any(_QATAR.search(seg) and _NEGATED.search(seg) for seg in aoai)
+    qatar_design = "qatar" in str(form_values.get("region", "")).lower() or bool(_QATAR.search(text))
+    if any(_UAE.search(seg) for seg in aoai):
+        if not qatar_design:
+            return "other"
+        return "uae_with_note" if _EGRESS_NOTE.search(text) else "uae_no_note"
+    if said_not_qatar:
+        return "other"  # says it can't go in Qatar Central but names no region — no flag
+    return "qatar" if "qatar" in str(form_values.get("region", "")).lower() else "other"
+
+
+_BLOCK_START = re.compile(r"^\s*(\||[-*+]\s|\d+[.)]\s|#|```|>)")
+
+
+def _segments(text: str) -> list[str]:
+    """Sentences, with wrapped prose lines re-joined; table rows, bullets and headings
+    stay separate so a row's region stays attached to its component."""
+    blocks: list[str] = []
+    for line in text.splitlines():
+        if not line.strip():
+            blocks.append("")
+        elif _BLOCK_START.match(line) or not blocks or not blocks[-1]:
+            blocks.append(line.strip())
+        else:
+            blocks[-1] += " " + line.strip()
+    return [seg for b in blocks if b for seg in re.split(r"(?<=[.;])\s+", b)]
+
+
+def _apply_openai_region_rule(flags: list, architecture_summary: str, form_values: dict) -> list:
+    """Deterministic backstop for the Qatar Central / Azure OpenAI rule: replaces whatever
+    the LLM said about Azure OpenAI region placement with one consistent verdict."""
+    verdict = openai_region_verdict(architecture_summary, form_values)
+    if verdict in ("none", "other"):
+        return flags
+    kept = [
+        f for f in flags
+        if not (isinstance(f, dict)
+                and _OPENAI_REGION_FLAG.search(str(f.get("message", "")))
+                and (_QATAR.search(str(f.get("message", ""))) or _UAE.search(str(f.get("message", "")))))
+    ]
+    if verdict == "qatar":
+        kept.insert(0, {
+            "severity": "critical", "category": "wrong_region_availability",
+            "message": "Azure OpenAI is placed in Qatar Central, where no Azure OpenAI models "
+                       "can be deployed; deploy the models in UAE North and state that prompts "
+                       "and responses leave Qatar.",
+        })
+    elif verdict == "uae_no_note":
+        kept.append({
+            "severity": "medium", "category": "incomplete_specification",
+            "message": "The design calls Azure OpenAI in UAE North but does not state that "
+                       "prompts and responses leave Qatar; document this cross-border data flow.",
+        })
     return kept
 
 
@@ -274,6 +362,17 @@ def score_architecture(
         raw = _call_llm(prompt, engine_mode, model, provider, api_key)
         result = _parse(raw)
         result["flags"] = _drop_hub_false_positives(result["flags"], form_values)
+        result["flags"] = _apply_openai_region_rule(
+            result["flags"], architecture_summary, form_values
+        )
         return result
     except Exception:
-        return dict(_FALLBACK)
+        # The Azure OpenAI region rule doesn't need the LLM — surface it even when scoring fails
+        fallback = dict(_FALLBACK)
+        try:
+            fallback["flags"] = _apply_openai_region_rule(
+                list(_FALLBACK["flags"]), architecture_summary, form_values
+            )
+        except Exception:
+            pass
+        return fallback
