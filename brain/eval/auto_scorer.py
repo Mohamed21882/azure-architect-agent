@@ -30,7 +30,7 @@ def _build_prompt(
         f"Region: {form_values.get('region', 'N/A')}\n"
         f"Compliance: {form_values.get('compliance', 'N/A')}\n"
         f"Budget: {form_values.get('budget', 'N/A')}\n"
-        f"Hub VNet: {form_values.get('hub_vnet', 'N/A')}\n"
+        f"Existing Hub VNet: {_hub_vnet_meaning(form_values.get('hub_vnet', 'N/A'))}\n"
         f"Additional: {form_values.get('additional_constraints', 'None') or 'None'}\n"
     )
 
@@ -69,6 +69,11 @@ def _build_prompt(
         "3. completeness — are all components required for the described workload present?\n"
         "4. overall — weighted: constraint_adherence×0.4 + security_posture×0.3 "
         "+ completeness×0.3\n\n"
+        "IMPORTANT — hub VNet constraint:\n"
+        '"Existing Hub VNet: No" means the customer has NO hub today, so the architecture '
+        "MUST CREATE a new hub VNet. A hub-spoke topology with a newly created hub VNet is "
+        "the CORRECT response to this constraint. Do NOT flag a new or dedicated hub VNet, "
+        "or a hub-spoke topology, as a constraint violation when Existing Hub VNet is No.\n\n"
         "IMPORTANT — service availability flags:\n"
         "Azure OpenAI IS available in Qatar Central (qatarcentral) — this is confirmed. "
         "Do NOT flag Azure OpenAI availability in Qatar Central as uncertain or unconfirmed. "
@@ -92,6 +97,46 @@ def _build_prompt(
         '"completeness":0.0,"overall":0.0,'
         '"flags":[{"severity":"medium","category":"budget_risk","message":"plain English"}]}'
     )
+
+
+def _hub_vnet_meaning(value: object) -> str:
+    v = str(value).strip()
+    if v.lower() == "no":
+        return "No (the customer has no hub VNet — the architecture must CREATE a new hub)"
+    if v.lower() == "yes":
+        return "Yes (the customer already has a hub VNet — spokes should connect to it)"
+    return v
+
+
+_HUB_FALSE_POSITIVE = re.compile(
+    r"hub\s*vnet\s*[:=]?\s*[\"']?no|no\s+(existing\s+)?hub|existing\s+hub|"
+    r"hub[- ]and[- ]spoke|hub[- ]spoke|dedicated\s+hub|new\s+hub|creat\w*\s+(a\s+)?hub",
+    re.IGNORECASE,
+)
+_ADDRESS_HINT = re.compile(r"\d+\.\d+\.\d+\.\d+|overlap", re.IGNORECASE)
+
+
+def _drop_hub_false_positives(flags: list[dict], form_values: dict) -> list[dict]:
+    """Safety net for LLM scorers that ignore the hub rule: with Existing Hub VNet = No,
+    creating a hub is required, so a constraint_violation objecting to it is dropped.
+    Address-overlap flags that happen to mention the hub are kept."""
+    if str(form_values.get("hub_vnet", "")).strip().lower() != "no":
+        return flags
+    kept = []
+    for f in flags:
+        if not isinstance(f, dict):
+            kept.append(f)
+            continue
+        msg = str(f.get("message", ""))
+        if (
+            f.get("category") == "constraint_violation"
+            and "hub" in msg.lower()
+            and _HUB_FALSE_POSITIVE.search(msg)
+            and not _ADDRESS_HINT.search(msg)
+        ):
+            continue
+        kept.append(f)
+    return kept
 
 
 def _call_llm(
@@ -227,6 +272,8 @@ def score_architecture(
             tenant_context,
         )
         raw = _call_llm(prompt, engine_mode, model, provider, api_key)
-        return _parse(raw)
+        result = _parse(raw)
+        result["flags"] = _drop_hub_false_positives(result["flags"], form_values)
+        return result
     except Exception:
         return dict(_FALLBACK)

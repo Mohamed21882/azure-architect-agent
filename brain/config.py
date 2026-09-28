@@ -29,6 +29,9 @@ class BrainConfig:
     # --- BM25 persistence ---
     bm25_index_path: str = ""
 
+    # --- Retrieval ---
+    brain_search_timeout: int = 180  # CPU Ollama may queue the query embedding behind a chat request
+
     # --- Microsoft Learn MCP ---
     use_learn_mcp: bool = True
     learn_mcp_url: str = "https://learn.microsoft.com/api/mcp"

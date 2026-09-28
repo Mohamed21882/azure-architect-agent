@@ -149,10 +149,13 @@ def get_brain_context(
             if ground_tenant and CONFIG.use_azure_mcp else None
         )
         if brain_f is not None:
+            # Leaving the executor waits for every thread anyway, so a short timeout only
+            # threw away a search we then waited for. CPU-only Ollama queues the query
+            # embedding behind any in-flight chat request, which can exceed 30s.
             try:
-                local_hits = brain_f.result(timeout=30.0)
+                local_hits = brain_f.result(timeout=CONFIG.brain_search_timeout)
             except Exception as exc:
-                brain_err = f"[Brain unavailable: {exc}]\n"
+                brain_err = f"[Brain unavailable: {str(exc) or type(exc).__name__}]\n"
         if learn_f is not None:
             try:
                 learn_hits = learn_f.result(timeout=7.0)
@@ -163,6 +166,8 @@ def get_brain_context(
                 tenant_ctx = tenant_f.result(timeout=CONFIG.azure_mcp_timeout + 5)
             except Exception as exc:
                 tenant_ctx = TenantContext(fetched_at=time.time(), error=str(exc)[:200] or "timed out")
+
+    st.session_state.last_brain_error = brain_err.strip().strip("[]")
 
     if ground_tenant:
         if tenant_ctx is None:
@@ -471,13 +476,19 @@ def inject_mermaid_styles(diagram: str) -> str:
     return "\n".join(final)
 
 
+def md_escape_dollars(text: str) -> str:
+    """Escape $ for st.markdown, which treats $...$ as LaTeX. Render-time only —
+    stored text (history, flags, saved architectures) is never modified."""
+    return re.sub(r"(?<!\\)\$", r"\\$", text or "")
+
+
 def render_assistant_message(content: str) -> None:
     mermaid_match = re.search(r"```mermaid\s*(.*?)\s*```", content, re.DOTALL | re.IGNORECASE)
     summary = re.sub(r"```mermaid.*?```", "", content, flags=re.DOTALL | re.IGNORECASE)
     summary = re.sub(r"```bicep.*?(?:```|$)", "", summary, flags=re.DOTALL | re.IGNORECASE)
     summary = summary.strip()
     if summary:
-        st.markdown(summary)
+        st.markdown(md_escape_dollars(summary))
     if mermaid_match:
         st.markdown("---")
         st.subheader("📊 Architecture Diagram")
@@ -567,6 +578,7 @@ def _reset_arch_state() -> None:
     st.session_state.chat_display           = []
     st.session_state.last_hits              = []
     st.session_state.last_learn_hits        = []
+    st.session_state.last_brain_error       = ""
     st.session_state.last_tenant_ctx        = None
     st.session_state.architecture_generated = False
     st.session_state.form_values            = {}
@@ -614,6 +626,7 @@ def _load_arch_into_session(arch_id: int) -> None:
     st.session_state.show_deploy_msg        = False
     st.session_state.last_hits              = []
     st.session_state.last_learn_hits        = []
+    st.session_state.last_brain_error       = ""
     st.session_state.last_tenant_ctx        = None
     st.session_state.show_save_input        = False
     st.session_state.arch_saved             = True  # already persisted
@@ -720,6 +733,7 @@ _defaults: dict = {
     "chat_display":             [],
     "last_hits":                [],
     "last_learn_hits":          [],
+    "last_brain_error":         "",
     "last_tenant_ctx":          None,   # TenantContext | None (None = not requested)
     "architecture_generated":   False,
     "form_values":              {},
@@ -780,11 +794,11 @@ with st.sidebar:
     # ── Brain Context placeholders — populated by update_brain_context() ───
     st.divider()
     st.subheader("🧠 Brain Context")
-    brain_ctx_container = st.sidebar.container()
+    brain_ctx_slot = st.sidebar.empty()  # st.empty slots: each update replaces, never appends
     st.subheader("🌐 Microsoft Learn Live")
-    learn_ctx_container = st.sidebar.container()
+    learn_ctx_slot = st.sidebar.empty()
     st.subheader("🔷 Azure Tenant Context")
-    tenant_ctx_container = st.sidebar.container()
+    tenant_ctx_slot = st.sidebar.empty()
 
     # ── Evals Dashboard link ──────────────────────────────────────────────
     st.divider()
@@ -849,7 +863,7 @@ def _llm(max_tokens: int = 8192, temperature: float = 1.0) -> dict:
 def update_brain_context() -> None:
     """Write current Brain Context hits into the sidebar containers."""
     hits = st.session_state.get("last_hits", [])
-    with brain_ctx_container:
+    with brain_ctx_slot.container():
         if hits:
             st.caption(f"{len(hits)} chunks retrieved")
             for i, h in enumerate(hits, 1):
@@ -865,26 +879,28 @@ def update_brain_context() -> None:
                     f"</div>",
                     unsafe_allow_html=True,
                 )
+        elif st.session_state.get("last_brain_error"):
+            st.caption(f"⚠️ {st.session_state.last_brain_error}")
         else:
             st.caption("No query run yet.")
 
     learn_hits = st.session_state.get("last_learn_hits", [])
-    with learn_ctx_container:
+    with learn_ctx_slot.container():
         if learn_hits:
             for r in learn_hits:
                 title = r.get("title", "Microsoft Learn")[:60]
                 url   = r.get("url", "")
                 snip  = r.get("snippet", "")[:100]
-                st.markdown(
+                st.markdown(md_escape_dollars(
                     f"**{title}**  \n"
                     f"[{url[:70]}]({url})  \n"
                     f"_{snip}_"
-                )
+                ))
         else:
             st.caption("⚠️ Live docs unavailable")
 
     tenant_ctx = st.session_state.get("last_tenant_ctx")
-    with tenant_ctx_container:
+    with tenant_ctx_slot.container():
         if tenant_ctx is None:
             st.caption("Not requested")
         elif tenant_ctx.error:
@@ -987,7 +1003,7 @@ def render_issues(issues: list, form_values: dict) -> None:
                 st.markdown(f"## {icon}")
             with c_body:
                 st.markdown(f"**{label}**")
-                st.markdown(message)
+                st.markdown(md_escape_dollars(message))
                 if fix_msg:
                     if st.button("💡 Fix this", key=f"fix_{idx}", use_container_width=False):
                         st.session_state.auto_fix_triggered = True
@@ -1258,11 +1274,11 @@ if submit:
 if st.session_state.architecture_generated:
     fv = st.session_state.form_values
 
-    st.info(
+    st.info(md_escape_dollars(
         f"{fv.get('description', '').strip()} \n\n"
         f"**{fv.get('region', '')}** · Compliance: **{fv.get('compliance', '')}** · "
         f"Budget: **{fv.get('budget', '')}** · Hub VNet: **{fv.get('hub_vnet', '')}**"
-    )
+    ))
 
     for msg in st.session_state.chat_display:
         if msg["role"] == "assistant":
@@ -1270,7 +1286,7 @@ if st.session_state.architecture_generated:
                 render_assistant_message(msg["content"])
         else:
             with st.chat_message("user"):
-                st.markdown(msg["content"])
+                st.markdown(md_escape_dollars(msg["content"]))
 
     # ── Refinement input ──────────────────────────────────────────────────
 
