@@ -119,20 +119,21 @@ SYSTEM_BICEP = (
 # ── Brain ──────────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner="Loading Brain index…", max_entries=1)
-def _load_bm25_cached(mtime: float) -> BM25Index | None:
+def _load_bm25_cached(path: str, mtime: float) -> BM25Index | None:
     try:
-        return BM25Index.load(CONFIG.bm25_index_path)
+        return BM25Index.load(path)
     except Exception:
         return None
 
 
 def load_bm25() -> BM25Index | None:
-    """Keyed on the index file time so a knowledge base update is picked up without a restart."""
+    """Keyed on the index file + time, so an update or an index switch (which changes
+    CONFIG.bm25_index_path in-process) is picked up without a restart."""
     try:
         mtime = os.path.getmtime(CONFIG.bm25_index_path)
     except OSError:
         mtime = 0.0
-    return _load_bm25_cached(mtime)
+    return _load_bm25_cached(CONFIG.bm25_index_path, mtime)
 
 
 def get_brain_context(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 
@@ -70,8 +71,46 @@ class BrainConfig:
             "azure-foundry":        os.path.join(r, "raw", "azure-foundry", "articles", "foundry"),
             "cli":                  os.path.join(r, "raw", "cli"),
             "region-availability":  os.path.join(r, "raw", "region-availability"),
+            "microsoft-fabric":     os.path.join(r, "raw", "microsoft-fabric"),
         }
+
+    @property
+    def source_excludes(self) -> dict[str, list[str]]:
+        """Sub-folders (relative to the source dir) never ingested for that source.
+        azure-ai and azure-foundry are both clones of azure-ai-docs; Foundry content is
+        owned by the azure-foundry source, so azure-ai must not index it too."""
+        return {"azure-ai": ["articles/foundry"]}
+
+    def is_excluded(self, repo_name: str, abs_path: str) -> bool:
+        root = self.source_dirs.get(repo_name, "")
+        rel = os.path.relpath(abs_path, root).replace(os.sep, "/")
+        return any(rel == ex or rel.startswith(ex.rstrip("/") + "/")
+                   for ex in self.source_excludes.get(repo_name, []))
+
+    @property
+    def manifest_path(self) -> str:
+        """One ingest manifest per index, so a candidate rebuild never overwrites the
+        manifest of the index that is serving."""
+        name = "ingest_manifest.json" if self.qdrant_collection == "azure_wiki" \
+            else f"ingest_manifest_{self.qdrant_collection}.json"
+        return os.path.join(self.wiki_root, "data", name)
+
+    @property
+    def active_index_path(self) -> str:
+        return os.path.join(self.wiki_root, "data", "active_index.json")
+
+    def apply_active_index(self) -> None:
+        """Point this config at the index recorded in data/active_index.json (written by
+        brain.kb.index_switch). Absent file = the original azure_wiki + bm25.pkl."""
+        try:
+            with open(self.active_index_path, "r", encoding="utf-8") as fh:
+                active = json.load(fh)
+            self.qdrant_collection = active["collection"]
+            self.bm25_index_path = active["bm25_path"]
+        except (OSError, KeyError, ValueError):
+            pass
 
 
 # Module-level singleton — import this in other modules
 CONFIG = BrainConfig()
+CONFIG.apply_active_index()

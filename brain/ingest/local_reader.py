@@ -49,12 +49,14 @@ def walk_source(
     source_repo: str,
     root_dir: str,
     extra_metadata: dict | None = None,
+    exclude_dirs: list[str] | None = None,
 ) -> Iterator[RawDocument]:
     """Recursively yield one RawDocument per .md file under root_dir.
 
     Args:
         source_repo:    Logical name for this source (stored in source_repo field).
         root_dir:       Root directory to walk recursively.
+        exclude_dirs:   Sub-folders of root_dir (relative, e.g. "articles/foundry") to skip.
         extra_metadata: Optional dict merged into each RawDocument's metadata.
                         Use for source-level tags such as
                         {"source_type": "region_availability", "priority": "high"}.
@@ -70,7 +72,11 @@ def walk_source(
 
     base_meta = extra_metadata or {}
 
-    for dirpath, _dirs, filenames in os.walk(str(root_dir)):
+    excluded = [os.path.join(str(root_dir), ex) for ex in (exclude_dirs or [])]
+
+    for dirpath, dirs, filenames in os.walk(str(root_dir)):
+        if excluded:
+            dirs[:] = [d for d in dirs if os.path.join(dirpath, d) not in excluded]
         for fname in sorted(filenames):
             if not fname.endswith(".md"):
                 continue
@@ -109,6 +115,7 @@ def walk_source(
 
 _SOURCE_METADATA: dict[str, dict] = {
     "region-availability": {"source_type": "region_availability", "priority": "high"},
+    "microsoft-fabric":    {"source_type": "well_architected", "priority": "high"},
 }
 
 
@@ -118,5 +125,6 @@ def read_all_sources(
     """Yield (source_repo_name, RawDocument) for every .md file across all sources."""
     for repo_name, root_dir in config.source_dirs.items():
         extra = _SOURCE_METADATA.get(repo_name)
-        for doc in walk_source(repo_name, root_dir, extra_metadata=extra):
+        excludes = config.source_excludes.get(repo_name)
+        for doc in walk_source(repo_name, root_dir, extra_metadata=extra, exclude_dirs=excludes):
             yield repo_name, doc

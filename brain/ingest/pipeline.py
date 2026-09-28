@@ -51,7 +51,6 @@ from brain.store.vector_store import (
 )
 
 _QDRANT_BATCH = 256
-_MANIFEST_PATH = os.path.join(CONFIG.wiki_root, "data", "ingest_manifest.json")
 
 
 @dataclass
@@ -101,7 +100,7 @@ def _print_stats_table(stats: dict[str, RepoStats]) -> None:
 
 
 def _load_manifest(config: BrainConfig) -> dict:
-    manifest_path = os.path.join(config.wiki_root, "data", "ingest_manifest.json")
+    manifest_path = config.manifest_path
     try:
         with open(manifest_path, "r", encoding="utf-8") as fh:
             return json.load(fh)
@@ -110,7 +109,7 @@ def _load_manifest(config: BrainConfig) -> dict:
 
 
 def _save_manifest(manifest: dict, config: BrainConfig) -> None:
-    manifest_path = os.path.join(config.wiki_root, "data", "ingest_manifest.json")
+    manifest_path = config.manifest_path
     try:
         os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
         with open(manifest_path, "w", encoding="utf-8") as fh:
@@ -126,6 +125,8 @@ def run_pipeline(config: BrainConfig = CONFIG, reset: bool = False) -> None:
     print("╚══════════════════════════════════════╝\n")
 
     # ── Phase 0: Scan sources ──────────────────────────────────────────────
+    _phase("scan sources")
+    print(f"Target: collection '{config.qdrant_collection}', BM25 {config.bm25_index_path}")
     print("Scanning source directories...")
     repo_docs: dict[str, list] = defaultdict(list)
     for repo, doc in read_all_sources(config):
@@ -176,6 +177,7 @@ def run_pipeline(config: BrainConfig = CONFIG, reset: bool = False) -> None:
 
     # ── Phase 2: Per-repo ingest ───────────────────────────────────────────
     for repo, docs in repo_docs.items():
+        _phase(f"ingest {repo}")
         s = stats[repo]
         t0 = time.perf_counter()
         all_chunks = []
@@ -253,6 +255,7 @@ def run_pipeline(config: BrainConfig = CONFIG, reset: bool = False) -> None:
         print()  # blank line between repos
 
     # ── Phase 3: Persist BM25 ─────────────────────────────────────────────
+    _phase("save index")
     print(f"Building BM25 index over {len(bm25)} chunks...")
     bm25.build()
     bm25.save(config.bm25_index_path)
@@ -279,7 +282,7 @@ def run_pipeline(config: BrainConfig = CONFIG, reset: bool = False) -> None:
     _save_manifest(
         {"last_run": now_str, "files": manifest_files, "repo_commits": repo_commits}, config
     )
-    print(f"  Manifest saved: {len(manifest_files)} files → data/ingest_manifest.json\n")
+    print(f"  Manifest saved: {len(manifest_files)} files → {config.manifest_path}\n")
 
     # ── Phase 5: Summary ──────────────────────────────────────────────────
     _print_stats_table(stats)
@@ -415,6 +418,10 @@ def run_incremental(config: BrainConfig = CONFIG, summary_path: str = "") -> dic
             rs["pull"] += f" | diff failed: {exc}"
             rs["new_commit"] = base  # don't advance — retry this range next run
             continue
+        added, modified, deleted = (
+            [p for p in lst if not config.is_excluded(repo_name, p)]
+            for lst in (added, modified, deleted)
+        )
         print(f"  [{repo_name}] {base[:10]}..{new[:10]}: "
               f"{len(added)} added, {len(modified)} modified, {len(deleted)} deleted .md")
         work += [(repo_name, p, "added") for p in added]
@@ -566,7 +573,7 @@ def run_incremental(config: BrainConfig = CONFIG, summary_path: str = "") -> dic
     manifest["files"] = files_manifest
     manifest["repo_commits"] = repo_commits
     _save_manifest(manifest, config)
-    print(f"  Manifest updated → data/ingest_manifest.json\n")
+    print(f"  Manifest updated → {config.manifest_path}\n")
 
     summary["finished_at"] = now_str
     summary["duration_s"] = round(time.perf_counter() - t_start, 1)
@@ -589,6 +596,9 @@ def _parse_args() -> tuple[BrainConfig, bool, bool, str]:
                         help="Target words per chunk")
     parser.add_argument("--qdrant-url", default=CONFIG.qdrant_url,
                         help="Qdrant base URL")
+    parser.add_argument("--bm25-path", default=None,
+                        help="BM25 index file (default: the active index's file, or "
+                             "brain/store/bm25_<collection>.pkl for another collection)")
     parser.add_argument("--reset", action="store_true",
                         help="Delete and recreate the Qdrant collection before ingesting")
     parser.add_argument("--incremental", action="store_true",
@@ -597,12 +607,17 @@ def _parse_args() -> tuple[BrainConfig, bool, bool, str]:
                         help="With --incremental: write a JSON run summary to this path")
     args = parser.parse_args()
 
+    bm25_path = args.bm25_path
+    if not bm25_path:
+        bm25_path = (CONFIG.bm25_index_path if args.collection == CONFIG.qdrant_collection
+                     else os.path.join(CONFIG.wiki_root, "brain", "store", f"bm25_{args.collection}.pkl"))
     cfg = BrainConfig(
         qdrant_url=args.qdrant_url,
         qdrant_collection=args.collection,
         embed_model=args.model,
         embed_batch_size=args.batch_size,
         chunk_size_words=args.chunk_size,
+        bm25_index_path=bm25_path,
     )
     return cfg, args.reset, args.incremental, args.summary_json
 

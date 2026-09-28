@@ -76,7 +76,8 @@ Project root: ~/Azure-Architect-Wiki
 │   ├── azure-ai/              # 4,354 MS docs (gitignored)
 │   ├── azure-foundry/         # 791 MS docs (gitignored)
 │   ├── cli/                   # 137 MS docs (gitignored)
-│   └── region-availability/   # VERSIONED: Qatar Central + UAE North curated data (3 files)
+│   ├── region-availability/   # VERSIONED: Qatar Central + UAE North curated data (3 files)
+│   └── microsoft-fabric/      # Curated, NOT versioned (verbatim Learn content): 6 WAF pages, last_verified frontmatter
 ├── data/
 │   ├── qdrant/                # Qdrant persistent storage (gitignored)
 │   ├── ingest_manifest.json   # Written by ingest runs: files, last_run, repo_commits (did NOT exist before Sep 28 2026)
@@ -100,7 +101,9 @@ Project root: ~/Azure-Architect-Wiki
 - 63,921 chunks in Qdrant (768-dim cosine)
 - 63,921 chunks in BM25 index (brain/store/bm25.pkl, 117MB)
 - Indexed (Sep 28 2026, BM25): architecture-center 533 docs / 8,781 chunks, azure-ai 4,192 / 42,374, azure-foundry 694 / 9,607, cli 134 / 3,118, region-availability 3 / 32. Qdrant holds 63,313 vectors (599 chunks never embedded → keyword-only)
-- microsoft-fabric: NOT in raw/ and NOT in the index — the earlier brief was wrong; the KB panel flags it as missing
+- microsoft-fabric: created Sep 28 2026 — 6 WAF pages from learn.microsoft.com/azure/well-architected/microsoft-fabric/ (overview, reliability, security, cost-optimization, operational-excellence, performance-efficiency) fetched via Learn MCP microsoft_docs_fetch; gitignored because the WAF source repo is private and no public license was found. Added to source_dirs; enters the index at the next full rebuild
+- Foundry de-dup: BrainConfig.source_excludes = {"azure-ai": ["articles/foundry"]} (walk + incremental); azure-foundry owns Foundry. azure-ai still scans foundry-classic (514 docs) and foundry-local (74). The serving azure_wiki still has the duplicates until the rebuild
+- Sep 28 2026: backfilled the 608 missing vectors into azure_wiki (brain.ingest.backfill_vectors); failures were whole transient batches — embedder now retries (2/5/15s) then falls back to per-chunk
 - azure-ai and azure-foundry are both clones of MicrosoftDocs/azure-ai-docs (azure-foundry ingests only articles/foundry; azure-foundry's remote is SSH)
 - Qdrant collection name: azure_wiki
 
@@ -156,6 +159,8 @@ Project root: ~/Azure-Architect-Wiki
 - max_tokens=4096 for architecture generation/refinement; max_tokens=-1 (unlimited) for Bicep
 - _do_approve() is the single canonical approve path — called from both Approve button and "Skip and Approve →"
 - run_incremental() (rewritten Sep 28 2026): skips sources inside the TE-1 repo (curated), records each repo's baseline commit in manifest.repo_commits BEFORE pulling, `git pull --ff-only` (CONFIG.git_pull_timeout 1800s), diffs `--name-status --relative -M base..new` (A/M/D/R), removes old chunks by file_path from Qdrant (delete_by_file_paths) and BM25 (remove_files) — works with no manifest — then re-chunks/embeds. BM25Index.save() is atomic (tmp + os.replace)
+- Serving index = data/active_index.json {collection, bm25_path, previous} applied to CONFIG at import (absent = azure_wiki + bm25.pkl). brain.kb.index_switch.switch_to() validates, writes it and mutates CONFIG in-process; load_bm25 is keyed on (path, mtime). Manifest is per index (CONFIG.manifest_path). Old indexes are never deleted
+- Full rebuild: `python -m brain.kb.updater --rebuild` (panel button) — gated on curated sources verified within 30 days (rebuild_gate), pulls all 4 repos --ff-only (aborts on failure), runs `pipeline --reset --collection azure_wiki_<UTCstamp> --bm25-path brain/store/bm25_<name>.pkl`, then writes data/kb_update/rebuild.json: old vs new per-source counts, checks (no missing vectors, zero azure-ai chunks under articles/foundry), sample searches on both. Switch only after user confirmation (panel checkbox + button, or index_switch CLI)
 - Learn MCP falls back silently on timeout/error — never blocks generation; asyncio.run() safe in ThreadPoolExecutor threads
 - Auto-scorer must NOT flag mainstream Azure services (Firewall, VPN Gateway, Bastion, AKS, AI Search, Storage, Key Vault) as unavailable in any GA region without confirmed evidence
 - Azure OpenAI IS confirmed available in Qatar Central — do not re-add a flag for it
@@ -190,7 +195,7 @@ Project root: ~/Azure-Architect-Wiki
 
 ## Next Session Priorities
 
-1. Knowledge base refresh — use the admin panel (Check for updates → Update now); first real run not yet done. Review raw/region-availability by hand (months stale) and decide whether to create the Microsoft Fabric source
+1. Knowledge base catch-up = FULL REBUILD, blocked until the user sends corrected raw/region-availability files (with last_verified). Then: Start full rebuild → review rebuild.json comparison with the user → switch only on explicit confirmation; keep azure_wiki for switch-back
 2. Deploy engine design — builds on Phase 1 tenant context (Azure MCP + SP pattern); design in chat first, needs a separate write-scoped SP + programmatic HITL gate
 3. Azure MCP Phase 2 candidates — group_resource_list for existing resources, quota_usage_check / quota_region_availability_list for capacity grounding
 4. Commercial pages (tensoredge.net, Paddle) — parked until the user revisits

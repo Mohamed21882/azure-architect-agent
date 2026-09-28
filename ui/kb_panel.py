@@ -8,12 +8,13 @@ import pandas as pd
 import streamlit as st
 
 from brain.config import CONFIG
+from brain.kb import index_switch
 from brain.kb import status as kb
 
 
 @st.cache_data(ttl=120, show_spinner="Reading knowledge base state…")
-def _cached_snapshot(bm25_mtime: float) -> dict:
-    # Keyed on the BM25 file time, so a finished update is picked up immediately
+def _cached_snapshot(bm25_path: str, bm25_mtime: float) -> dict:
+    # Keyed on the BM25 file + time, so a finished update or index switch shows at once
     return kb.snapshot()
 
 
@@ -68,7 +69,9 @@ def render_kb_panel() -> None:
     _render_status(running)
 
     # ── Current state ──────────────────────────────────────────────────────
-    snap = _cached_snapshot(_bm25_mtime())
+    st.caption(f"Serving index: `{CONFIG.qdrant_collection}` + "
+               f"`{os.path.relpath(CONFIG.bm25_index_path, CONFIG.wiki_root)}`")
+    snap = _cached_snapshot(CONFIG.bm25_index_path, _bm25_mtime())
     last_ts, last_src = kb.last_ingest()
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total chunks", _n(snap["total_chunks"]))
@@ -139,6 +142,8 @@ def render_kb_panel() -> None:
             st.success(f"**{name}**: last verified {info['last_verified']} "
                        f"({info['age_days']} days ago, {info['files']} files).")
 
+    _render_rebuild(running)
+
     # ── Last run + history ─────────────────────────────────────────────────
     history = kb.read_history()
     if history:
@@ -166,7 +171,8 @@ def _render_status(running: bool) -> None:
             if not kb.is_update_running():
                 st.rerun()  # finished — redraw the whole panel with the results
             prog = s.get("progress")
-            st.info(f"⏳ Update running since {_fmt_ts(s.get('started_at', ''))[:16]} — "
+            what = "Full rebuild" if s.get("kind") == "rebuild" else "Update"
+            st.info(f"⏳ {what} running since {_fmt_ts(s.get('started_at', ''))[:16]} — "
                     f"phase: **{s.get('phase', '…')}**")
             if prog and prog.get("total"):
                 st.progress(prog["done"] / prog["total"],
@@ -215,3 +221,74 @@ def _render_last_run(h: dict) -> None:
     for repo, r in (h.get("repos") or {}).items():
         if r.get("pull", "").startswith("FAILED") or "diff failed" in r.get("pull", ""):
             st.warning(f"{repo}: {r['pull']}")
+
+
+def _render_rebuild(running: bool) -> None:
+    st.subheader("Full rebuild (new index, switch after review)")
+    st.caption("Pulls all four Microsoft repos, then builds a fresh Qdrant collection and BM25 "
+               "file next to the serving one. TE-1 keeps serving the current index throughout; "
+               "nothing switches until you confirm below. ~64k chunks at ~12 chunks/s is about "
+               "1.5 h with Ollama idle, longer while people generate.")
+    gate_ok, problems = kb.rebuild_gate()
+    if not gate_ok:
+        st.error("Rebuild blocked until curated sources are reviewed: " + "; ".join(problems)
+                 + ". Update the files and set `last_verified` in their frontmatter.")
+    if st.button("🏗️ Start full rebuild", disabled=running or not gate_ok,
+                 help="Runs in the background; progress appears above"):
+        st.toast("Rebuild started" if kb.start_update(["--rebuild"]) else "An update is already running")
+        st.rerun()
+
+    report = kb.read_rebuild()
+    if not report:
+        return
+    cand, serv = report["candidate"], report["serving"]
+    is_active = CONFIG.qdrant_collection == cand["collection"]
+    st.markdown(f"**Candidate** `{cand['collection']}` built {_fmt_ts(report.get('built_at', ''))[:16]}"
+                f" — compared against `{serv['collection']}`"
+                + (" · ✅ **now serving**" if is_active else ""))
+
+    old_src, new_src = serv["snapshot"]["sources"], cand["snapshot"]["sources"]
+    rows = []
+    for src in sorted(set(old_src) | set(new_src)):
+        o, n = old_src.get(src, {}), new_src.get(src, {})
+        rows.append({"Source": src,
+                     "Docs old": o.get("docs"), "Docs new": n.get("docs"), "Docs Δ": _delta(o.get("docs"), n.get("docs")),
+                     "Chunks old": o.get("chunks"), "Chunks new": n.get("chunks"), "Chunks Δ": _delta(o.get("chunks"), n.get("chunks")),
+                     "Vectors old": o.get("vectors"), "Vectors new": n.get("vectors")})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    chk = report["checks"]
+    f = chk["foundry_chunks_under_azure_ai"]
+    (st.success if chk["passed"] else st.error)(
+        f"Checks {'passed' if chk['passed'] else 'FAILED'} — chunks without vectors: "
+        f"{sum(chk['missing_vectors'].values()) if chk['missing_vectors'] else 0}; "
+        f"Foundry chunks under azure-ai: BM25 {f['bm25']}, Qdrant {f['qdrant']}")
+
+    with st.expander("Sample searches — serving vs candidate"):
+        for q, new_hits in report["samples"]["candidate"].items():
+            st.markdown(f"**{q}**")
+            c_old, c_new = st.columns(2)
+            for col, label, hits in ((c_old, serv["collection"], report["samples"]["serving"].get(q, [])),
+                                     (c_new, cand["collection"], new_hits)):
+                with col:
+                    st.caption(label)
+                    for h in hits:
+                        st.markdown(f"- {h.get('title') or h.get('error', '')} · `{h.get('source', '')}`")
+
+    if not is_active:
+        confirm = st.checkbox(f"I reviewed the comparison — serve TE-1 from `{cand['collection']}`",
+                              disabled=running or not chk["passed"])
+        if st.button("🔀 Switch to new index", type="primary", disabled=not confirm or running):
+            ok, msg = index_switch.switch_to(cand["collection"], cand["bm25_path"])
+            (st.toast if ok else st.error)(msg)
+            if ok:
+                st.cache_data.clear()
+                st.rerun()
+    else:
+        prev = index_switch.previous()
+        if prev and st.button(f"↩️ Switch back to `{prev['collection']}`", disabled=running):
+            ok, msg = index_switch.switch_to(prev["collection"], prev["bm25_path"])
+            (st.toast if ok else st.error)(msg)
+            if ok:
+                st.cache_data.clear()
+                st.rerun()

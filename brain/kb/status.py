@@ -23,7 +23,7 @@ HISTORY_PATH = os.path.join(KB_DIR, "history.json")
 CHECK_PATH   = os.path.join(KB_DIR, "check.json")
 LOCK_PATH    = os.path.join(KB_DIR, "update.lock")
 LOG_PATH     = os.path.join(KB_DIR, "last_run.log")
-MANIFEST_PATH = os.path.join(CONFIG.wiki_root, "data", "ingest_manifest.json")
+REBUILD_PATH = os.path.join(KB_DIR, "rebuild.json")
 
 MS_REPOS = ("architecture-center", "azure-ai", "azure-foundry", "cli")
 CURATED = {
@@ -101,7 +101,7 @@ def snapshot(config: BrainConfig = CONFIG, with_vectors: bool = True) -> dict:
 def last_ingest(config: BrainConfig = CONFIG) -> tuple[str, str]:
     """(timestamp, where it came from). Falls back to the BM25 file time when the
     manifest does not exist (it was never written before incremental ingest ran)."""
-    manifest = _read_json(MANIFEST_PATH, {})
+    manifest = _read_json(config.manifest_path, {})
     if manifest.get("last_run"):
         return manifest["last_run"], "ingest manifest"
     try:
@@ -224,6 +224,23 @@ def check_updates(config: BrainConfig = CONFIG) -> dict:
     result = {"started_at": started, "checked_at": utcnow(), "repos": repos}
     write_json(CHECK_PATH, result)
     return result
+
+
+def rebuild_gate(config: BrainConfig = CONFIG) -> tuple[bool, list[str]]:
+    """A full rebuild must not start while any curated source is missing or older than
+    CURATED_MAX_AGE_DAYS — those files are baked into the new index as-is."""
+    problems = []
+    for name, info in curated_status(config).items():
+        if not info.get("exists"):
+            problems.append(f"{name}: missing")
+        elif info.get("stale"):
+            problems.append(f"{name}: last verified {info.get('last_verified')} "
+                            f"({info.get('age_days')} days ago)")
+    return (not problems), problems
+
+
+def read_rebuild() -> dict:
+    return _read_json(REBUILD_PATH, {})
 
 
 def last_check() -> dict:
