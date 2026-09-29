@@ -24,7 +24,7 @@ Project root: ~/Azure-Architect-Wiki
 - Python 3.12, Streamlit (UI)
 - Qdrant (vector store, Docker, persistent volume at data/qdrant/)
 - nomic-embed-text via Ollama (768-dim embeddings)
-- rank-bm25 (BM25 keyword index, persisted at brain/store/bm25.pkl)
+- rank-bm25 (BM25 keyword index; serving file set by data/active_index.json — currently brain/store/bm25_azure_wiki_20260928_1826.pkl)
 - SQLite at brain/store/te1.db (auth + saved architectures + evaluations)
 - Ollama local LLMs (mistral-small, qwen3.5, qwen3:14b) for dev/testing
 - External APIs: Claude, OpenAI, OpenRouter, Gemini (for production)
@@ -51,7 +51,7 @@ Project root: ~/Azure-Architect-Wiki
 │   │   ├── local_reader.py    # Walks raw/ repos, yields RawDocuments
 │   │   └── pipeline.py        # Main ingest runner, --incremental flag, manifest
 │   ├── search/
-│   │   ├── bm25_index.py      # BM25Okapi, persisted to brain/store/bm25.pkl
+│   │   ├── bm25_index.py      # BM25Okapi, persisted to brain/store/bm25*.pkl (one file per index; all gitignored)
 │   │   ├── hybrid_search.py   # RRF fusion, temporal reranking, reinforcement
 │   │   ├── learn_mcp.py       # Microsoft Learn MCP Server live retrieval
 │   │   └── context_format.py  # format_brain_section(): Brain hits → prompt, legacy Foundry under its own heading
@@ -99,14 +99,15 @@ Project root: ~/Azure-Architect-Wiki
 
 ## Knowledge Base State
 
-- 63,921 chunks in Qdrant (768-dim cosine)
-- 63,921 chunks in BM25 index (brain/store/bm25.pkl, 117MB)
-- Indexed (Sep 28 2026, BM25): architecture-center 533 docs / 8,781 chunks, azure-ai 4,192 / 42,374, azure-foundry 694 / 9,607, cli 134 / 3,118, region-availability 3 / 32. Qdrant holds 63,313 vectors (599 chunks never embedded → keyword-only)
+- SERVING INDEX (switched Sep 29 2026 13:52 UTC after user approval): Qdrant collection `azure_wiki_20260928_1826` + `brain/store/bm25_azure_wiki_20260928_1826.pkl` (data/active_index.json). Built by full rebuild Sep 28 18:26–19:50 UTC from repos pulled that day; all verification checks passed
+- Per source (docs / chunks / vectors): architecture-center 547 / 9,098 / 9,098 · azure-ai 3,423 / 34,017 / 34,017 · azure-foundry 899 / 10,768 / 10,768 · cli 135 / 3,170 / 3,170 · crystallised 2 / 40 / 40 · microsoft-fabric 6 / 56 / 56 · region-availability 3 / 22 / 22 · TOTAL 5,015 / 57,171 / 57,171 (768-dim cosine, nomic-embed-text)
+- Checks at build: 0 missing vectors; 0 azure-ai chunks from articles/foundry or articles/foundry-local; 4,904 foundry-classic chunks tagged legacy (0 untagged); 40 crystallised vectors
+- PREVIOUS INDEX KEPT for switch-back (do NOT delete until the user says so): `azure_wiki` + `brain/store/bm25.pkl` — 5,556 docs / 63,902 chunks / 63,911 vectors (includes Foundry duplicates and 9 stale vectors). Switch back: panel button or `python -m brain.kb.index_switch --to azure_wiki`
+- Source repo commits in the serving index: architecture-center 37cddda8f3, azure-ai 5365a5693f, azure-foundry 5365a5693f, cli 0b15c87720 (manifest: data/ingest_manifest_azure_wiki_20260928_1826.json)
 - microsoft-fabric: created Sep 28 2026 — 6 WAF pages from learn.microsoft.com/azure/well-architected/microsoft-fabric/ (overview, reliability, security, cost-optimization, operational-excellence, performance-efficiency) fetched via Learn MCP microsoft_docs_fetch; gitignored because the WAF source repo is private and no public license was found. Added to source_dirs; enters the index at the next full rebuild
 - Foundry de-dup: BrainConfig.source_excludes = {"azure-ai": ["articles/foundry", "articles/foundry-local"]} (walk + incremental). azure-foundry owns Foundry. azure-ai articles/foundry-classic (514 docs) is KEPT but tagged legacy: true (BrainConfig.legacy_dirs). The serving azure_wiki still has the old duplicates until the rebuild is switched in
 - Sep 28 2026: backfilled the 608 missing vectors into azure_wiki (brain.ingest.backfill_vectors); failures were whole transient batches — embedder now retries (2/5/15s) then falls back to per-chunk
 - azure-ai and azure-foundry are both clones of MicrosoftDocs/azure-ai-docs (azure-foundry ingests only articles/foundry; azure-foundry's remote is SSH)
-- Qdrant collection name: azure_wiki
 
 ## What Is Fully Shipped (Alpha v0.1)
 
@@ -204,7 +205,7 @@ Project root: ~/Azure-Architect-Wiki
 
 ## Next Session Priorities
 
-1. FULL REBUILD started Sep 28 2026 from the admin panel (`python -m brain.kb.updater --rebuild`) → candidate azure_wiki_<UTC stamp> + brain/store/bm25_<name>.pkl, report in data/kb_update/rebuild.json. Show the user old-vs-new counts per source, the checks and the sample searches; switch ONLY after explicit confirmation (panel checkbox + button, or `python -m brain.kb.index_switch --to <name>`); keep azure_wiki for switch-back
+1. DONE: full rebuild approved and switched in (Sep 29 2026). Keep azure_wiki + bm25.pkl until the user says to delete them. Next KB work: run 'Update now' (incremental) periodically against the new index; review region-availability every 30 days (gate blocks rebuilds when stale)
 2. Deploy engine design — builds on Phase 1 tenant context (Azure MCP + SP pattern); design in chat first, needs a separate write-scoped SP + programmatic HITL gate
 3. Azure MCP Phase 2 candidates — group_resource_list for existing resources, quota_usage_check / quota_region_availability_list for capacity grounding
 4. Commercial pages (tensoredge.net, Paddle) — parked until the user revisits

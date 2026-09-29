@@ -8,7 +8,7 @@ raw/*
 data/
 
 # Brain index and database
-brain/store/bm25.pkl
+brain/store/bm25*.pkl
 brain/store/te1.db
 *.db
 
